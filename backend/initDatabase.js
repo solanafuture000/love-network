@@ -1,5 +1,16 @@
 const db = require("./database");
 
+function addColumnIfMissing(table, column, definition) {
+  const columns = db.prepare(`PRAGMA table_info(${table})`).all();
+
+  const exists = columns.some((col) => col.name === column);
+
+  if (!exists) {
+    db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+    console.log(`Added column ${table}.${column}`);
+  }
+}
+
 db.exec(`
   CREATE TABLE IF NOT EXISTS users (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -13,7 +24,9 @@ db.exec(`
     last_mining_date DATETIME,
     kyc_status TEXT DEFAULT 'not_started',
     role TEXT DEFAULT 'USER',
-    referral_code TEXT
+    referral_code TEXT,
+    email_verified INTEGER DEFAULT 0,
+    two_factor_enabled INTEGER DEFAULT 0
   );
 
   CREATE TABLE IF NOT EXISTS wallets (
@@ -105,13 +118,49 @@ db.exec(`
 
   CREATE TABLE IF NOT EXISTS email_otps (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
     email TEXT NOT NULL,
-    otp TEXT NOT NULL,
-    purpose TEXT,
+    otp_hash TEXT NOT NULL,
     expires_at DATETIME NOT NULL,
+    attempts INTEGER DEFAULT 0,
     verified INTEGER DEFAULT 0,
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    purpose TEXT,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (user_id) REFERENCES users(id)
   );
 `);
+
+/*
+  Existing databases may already have the tables with the older schema.
+  Add any missing columns safely.
+*/
+
+addColumnIfMissing("users", "email_verified", "INTEGER DEFAULT 0");
+addColumnIfMissing("users", "two_factor_enabled", "INTEGER DEFAULT 0");
+
+addColumnIfMissing("email_otps", "user_id", "INTEGER");
+addColumnIfMissing("email_otps", "otp_hash", "TEXT");
+addColumnIfMissing("email_otps", "attempts", "INTEGER DEFAULT 0");
+
+/*
+  Make sure existing OTP rows have safe default values.
+*/
+db.prepare(`
+  UPDATE email_otps
+  SET attempts = 0
+  WHERE attempts IS NULL
+`).run();
+
+db.prepare(`
+  UPDATE users
+  SET email_verified = 0
+  WHERE email_verified IS NULL
+`).run();
+
+db.prepare(`
+  UPDATE users
+  SET two_factor_enabled = 0
+  WHERE two_factor_enabled IS NULL
+`).run();
 
 console.log("LOVE Network database schema initialized");
