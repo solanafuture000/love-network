@@ -61,3 +61,7 @@ backend/routes/*backup*
 backend/routes/*.backup*
 backend/routes/*.before-*
 backend/temp_*
+backend/addReferralColumn.js
+backend/addRole.js
+backend/finalLedgerCheck.js
+backend/generateReferralCodes.js
