@@ -211,3 +211,19 @@ if (!miningConfig) {
 }
 
 console.log("LOVE Network database schema initialized");
+const migration = db.prepare(`
+  PRAGMA table_info(mining_sessions)
+`).all();
+
+const hasRewardPerHour = migration.some(
+  (column) => column.name === "reward_per_hour"
+);
+
+if (!hasRewardPerHour) {
+  db.prepare(`
+    ALTER TABLE mining_sessions
+    ADD COLUMN reward_per_hour REAL DEFAULT 0
+  `).run();
+
+  console.log("LOVE Network mining_sessions.reward_per_hour column added");
+}
