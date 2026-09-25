@@ -219,6 +219,10 @@ const hasRewardPerHour = migration.some(
   (column) => column.name === "reward_per_hour"
 );
 
+const hasMiningPhase = migration.some(
+  (column) => column.name === "mining_phase"
+);
+
 if (!hasRewardPerHour) {
   db.prepare(`
     ALTER TABLE mining_sessions
@@ -227,3 +231,14 @@ if (!hasRewardPerHour) {
 
   console.log("LOVE Network mining_sessions.reward_per_hour column added");
 }
+
+if (!hasMiningPhase) {
+  db.prepare(`
+    ALTER TABLE mining_sessions
+    ADD COLUMN mining_phase INTEGER DEFAULT 1
+  `).run();
+
+  console.log("LOVE Network mining_sessions.mining_phase column added");
+}
+
+
