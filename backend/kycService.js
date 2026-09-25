@@ -3,6 +3,19 @@ const db = require("./database");
 const KYC_MINING_SESSIONS = 50;
 
 function updateKycEligibility(userId) {
+  const user = db
+    .prepare(`
+      SELECT id, username, email
+      FROM users
+      WHERE id = ?
+    `)
+    .get(userId);
+
+  console.log("KYC DEBUG:", {
+    userId,
+    userExists: !!user,
+    user: user || null
+  });
   const result = db
     .prepare(`
       SELECT COUNT(*) AS completed_sessions
@@ -77,3 +90,4 @@ module.exports = {
   KYC_MINING_SESSIONS,
   updateKycEligibility
 };
+
