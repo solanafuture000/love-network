@@ -1,4 +1,4 @@
-const express = require("express");
+﻿const express = require("express");
 const bcrypt = require("bcrypt");
 const jwt = require("jsonwebtoken");
 const crypto = require("crypto");
@@ -7,7 +7,16 @@ const { sendOtpEmail } = require("../services/otpService");
 
 const router = express.Router();
 
-const JWT_SECRET = process.env.JWT_SECRET || "love-network-dev-secret";
+const JWT_SECRET =
+  process.env.JWT_SECRET || "love-network-dev-secret";
+
+const OTP_EXPIRY_MINUTES = 10;
+const MAX_OTP_ATTEMPTS = 5;
+
+
+/* =========================================================
+   REFERRAL CODE
+========================================================= */
 
 function generateReferralCode(username, userId) {
   const base = username
@@ -18,19 +27,99 @@ function generateReferralCode(username, userId) {
   return `${base}${userId}`;
 }
 
+
+/* =========================================================
+   OTP HELPERS
+========================================================= */
+
 function generateOtp() {
   return crypto.randomInt(100000, 1000000).toString();
 }
 
+
 function hashOtp(otp) {
   return crypto
     .createHash("sha256")
-    .update(otp)
+    .update(String(otp))
     .digest("hex");
 }
 
-function createOtpExpiry() {
-  return new Date(Date.now() + 10 * 60 * 1000).toISOString();
+
+function createChallengeToken(userId, email, purpose) {
+  return jwt.sign(
+    {
+      userId,
+      email,
+      purpose
+    },
+    JWT_SECRET,
+    {
+      expiresIn: `${OTP_EXPIRY_MINUTES}m`
+    }
+  );
+}
+
+
+function verifyChallengeToken(challengeToken, expectedPurpose) {
+  try {
+    const decoded = jwt.verify(
+      challengeToken,
+      JWT_SECRET
+    );
+
+    if (decoded.purpose !== expectedPurpose) {
+      return null;
+    }
+
+    return decoded;
+  } catch (error) {
+    return null;
+  }
+}
+
+
+function createOtpRecord(userId, email, purpose) {
+  const otp = generateOtp();
+  const otpHash = hashOtp(otp);
+
+  const expiresAt = new Date(
+    Date.now() + OTP_EXPIRY_MINUTES * 60 * 1000
+  ).toISOString();
+
+  db.prepare(`
+    INSERT INTO email_otps (
+      user_id,
+      email,
+      otp_hash,
+      expires_at,
+      attempts,
+      verified,
+      purpose
+    )
+    VALUES (?, ?, ?, ?, 0, 0, ?)
+  `).run(
+    userId,
+    email,
+    otpHash,
+    expiresAt,
+    purpose
+  );
+
+  return otp;
+}
+
+
+async function sendOtp(userId, email, purpose) {
+  const otp = createOtpRecord(
+    userId,
+    email,
+    purpose
+  );
+
+  await sendOtpEmail(
+    email,
+    otp
+  );
 }
 
 
@@ -40,12 +129,24 @@ function createOtpExpiry() {
 
 router.post("/register", async (req, res) => {
   try {
-    let { username, email, password, referralCode } = req.body;
+    let {
+      username,
+      email,
+      password,
+      referralCode
+    } = req.body;
 
     username = String(username || "").trim();
     email = String(email || "").trim().toLowerCase();
     password = String(password || "");
-    referralCode = String(referralCode || "").trim().toUpperCase();
+    referralCode = String(referralCode || "")
+      .trim()
+      .toUpperCase();
+
+
+    /* ---------------------------------------------
+       VALIDATION
+    --------------------------------------------- */
 
     if (!username || !email || !password) {
       return res.status(400).json({
@@ -54,12 +155,14 @@ router.post("/register", async (req, res) => {
       });
     }
 
+
     if (username.length < 3 || username.length > 30) {
       return res.status(400).json({
         success: false,
         message: "Username must be between 3 and 30 characters"
       });
     }
+
 
     if (password.length < 6) {
       return res.status(400).json({
@@ -68,30 +171,70 @@ router.post("/register", async (req, res) => {
       });
     }
 
+
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      return res.status(400).json({
+        success: false,
+        message: "Please enter a valid email address"
+      });
+    }
+
+
+    /* ---------------------------------------------
+       CHECK EXISTING USER
+    --------------------------------------------- */
+
     const existingUser = db.prepare(`
-      SELECT id
+      SELECT
+        id,
+        username,
+        email,
+        email_verified
       FROM users
       WHERE LOWER(username) = LOWER(?)
          OR LOWER(email) = LOWER(?)
       LIMIT 1
-    `).get(username, email);
+    `).get(
+      username,
+      email
+    );
+
 
     if (existingUser) {
+
+      if (
+        String(existingUser.email || "").toLowerCase() === email &&
+        Number(existingUser.email_verified) === 0
+      ) {
+        return res.status(409).json({
+          success: false,
+          message: "This email is already registered but not verified. Please complete email verification."
+        });
+      }
+
       return res.status(409).json({
         success: false,
         message: "Username or email already exists"
       });
     }
 
+
+    /* ---------------------------------------------
+       REFERRAL
+    --------------------------------------------- */
+
     let referrer = null;
 
     if (referralCode) {
       referrer = db.prepare(`
-        SELECT id, username
+        SELECT
+          id,
+          username
         FROM users
         WHERE UPPER(referral_code) = UPPER(?)
         LIMIT 1
       `).get(referralCode);
+
 
       if (!referrer) {
         return res.status(400).json({
@@ -101,9 +244,23 @@ router.post("/register", async (req, res) => {
       }
     }
 
-    const passwordHash = await bcrypt.hash(password, 12);
+
+    /* ---------------------------------------------
+       PASSWORD HASH
+    --------------------------------------------- */
+
+    const passwordHash = await bcrypt.hash(
+      password,
+      12
+    );
+
+
+    /* ---------------------------------------------
+       CREATE PENDING USER
+    --------------------------------------------- */
 
     const createUser = db.transaction(() => {
+
       const result = db.prepare(`
         INSERT INTO users (
           username,
@@ -111,40 +268,67 @@ router.post("/register", async (req, res) => {
           password_hash,
           role,
           kyc_status,
-          email_verified
+          email_verified,
+          two_factor_enabled
         )
-        VALUES (?, ?, ?, 'USER', 'not_started', 0)
+        VALUES (?, ?, ?, 'USER', 'not_started', 0, 1)
       `).run(
         username,
         email,
         passwordHash
       );
 
-      const userId = Number(result.lastInsertRowid);
 
-      let generatedReferralCode = generateReferralCode(
-        username,
-        userId
+      const userId = Number(
+        result.lastInsertRowid
       );
+
+
+      /* -----------------------------------------
+         GENERATE REFERRAL CODE
+      ----------------------------------------- */
+
+      let generatedReferralCode =
+        generateReferralCode(
+          username,
+          userId
+        );
+
 
       let codeExists = db.prepare(`
         SELECT id
         FROM users
         WHERE referral_code = ?
-      `).get(generatedReferralCode);
+      `).get(
+        generatedReferralCode
+      );
+
 
       let counter = 1;
 
+
       while (codeExists) {
+
         generatedReferralCode =
-          `${generateReferralCode(username, userId)}${counter++}`;
+          `${generateReferralCode(
+            username,
+            userId
+          )}${counter++}`;
+
 
         codeExists = db.prepare(`
           SELECT id
           FROM users
           WHERE referral_code = ?
-        `).get(generatedReferralCode);
+        `).get(
+          generatedReferralCode
+        );
       }
+
+
+      /* -----------------------------------------
+         SAVE REFERRAL CODE
+      ----------------------------------------- */
 
       db.prepare(`
         UPDATE users
@@ -155,7 +339,11 @@ router.post("/register", async (req, res) => {
         userId
       );
 
-      // Automatically create wallet
+
+      /* -----------------------------------------
+         CREATE WALLET
+      ----------------------------------------- */
+
       db.prepare(`
         INSERT INTO wallets (
           user_id,
@@ -163,10 +351,17 @@ router.post("/register", async (req, res) => {
           total_mined
         )
         VALUES (?, 0, 0)
-      `).run(userId);
+      `).run(
+        userId
+      );
 
-      // Create referral relationship
+
+      /* -----------------------------------------
+         CREATE REFERRAL RELATIONSHIP
+      ----------------------------------------- */
+
       if (referrer) {
+
         db.prepare(`
           INSERT INTO referrals (
             referrer_user_id,
@@ -182,99 +377,71 @@ router.post("/register", async (req, res) => {
         );
       }
 
-      return db.prepare(`
-        SELECT
-          id,
-          username,
-          email,
-          role,
-          referral_code,
-          kyc_status,
-          email_verified,
-          created_at
-        FROM users
-        WHERE id = ?
-      `).get(userId);
+
+      return userId;
     });
 
-    const user = createUser();
+
+    const userId = createUser();
+
 
     /* ---------------------------------------------
-       REGISTRATION OTP
+       CREATE OTP
     --------------------------------------------- */
 
-    const otp = generateOtp();
-    const otpHash = hashOtp(otp);
-    const expiresAt = createOtpExpiry();
-
-    // Invalidate previous registration OTPs
-    db.prepare(`
-      UPDATE email_otps
-      SET verified = 1
-      WHERE user_id = ?
-        AND purpose = 'registration'
-        AND verified = 0
-    `).run(user.id);
-
-    // Save registration OTP
-    db.prepare(`
-      INSERT INTO email_otps (
-        user_id,
+    const challengeToken =
+      createChallengeToken(
+        userId,
         email,
-        otp_hash,
-        expires_at,
-        attempts,
-        verified,
-        purpose
-      )
-      VALUES (?, ?, ?, ?, 0, 0, 'registration')
-    `).run(
-      user.id,
-      user.email,
-      otpHash,
-      expiresAt
-    );
+        "registration"
+      );
+
+
+    /* ---------------------------------------------
+       SEND REGISTRATION OTP
+    --------------------------------------------- */
 
     try {
-      await sendOtpEmail(user.email, otp);
+
+      await sendOtp(
+        userId,
+        email,
+        "registration"
+      );
+
     } catch (emailError) {
+
       console.error(
         "REGISTRATION OTP EMAIL ERROR:",
         emailError
       );
 
-      db.prepare(`
-        DELETE FROM users
-        WHERE id = ?
-      `).run(user.id);
-
-      return res.status(500).json({
+      return res.status(503).json({
         success: false,
-        message: "Unable to send verification email"
+        message: "Account created as pending verification, but the verification email could not be sent. Please try again."
       });
     }
 
-    const challengeToken = jwt.sign(
-      {
-        userId: user.id,
-        purpose: "registration_verification"
-      },
-      JWT_SECRET,
-      {
-        expiresIn: "10m"
-      }
-    );
+
+    /* ---------------------------------------------
+       REGISTRATION RESPONSE
+    --------------------------------------------- */
 
     return res.status(201).json({
       success: true,
+      message: "Verification code sent to your email.",
       requiresEmailVerification: true,
       challengeToken,
-      message: "Registration successful. Verification OTP sent to your email.",
-      expiresIn: 600
+      email
     });
 
+
   } catch (error) {
-    console.error("REGISTER ERROR:", error);
+
+    console.error(
+      "REGISTER ERROR:",
+      error
+    );
 
     return res.status(500).json({
       success: false,
@@ -285,322 +452,287 @@ router.post("/register", async (req, res) => {
 
 
 /* =========================================================
-   VERIFY REGISTRATION EMAIL OTP
+   REGISTER OTP VERIFY
 ========================================================= */
 
-router.post("/register/verify", async (req, res) => {
-  try {
-    const { challengeToken, otp } = req.body;
-
-    if (!challengeToken || !otp) {
-      return res.status(400).json({
-        success: false,
-        message: "Verification token and OTP are required"
-      });
-    }
-
-    if (!/^\d{6}$/.test(String(otp).trim())) {
-      return res.status(400).json({
-        success: false,
-        message: "OTP must be 6 digits"
-      });
-    }
-
-    let decoded;
+router.post(
+  "/register/verify",
+  async (req, res) => {
 
     try {
-      decoded = jwt.verify(
+
+      const {
         challengeToken,
-        JWT_SECRET
-      );
-    } catch (error) {
-      return res.status(401).json({
-        success: false,
-        message: "Verification session expired. Please register again."
-      });
-    }
+        otp
+      } = req.body;
 
-    if (
-      decoded.purpose !== "registration_verification"
-    ) {
-      return res.status(401).json({
-        success: false,
-        message: "Invalid verification session"
-      });
-    }
 
-    const user = db.prepare(`
-      SELECT *
-      FROM users
-      WHERE id = ?
-      LIMIT 1
-    `).get(decoded.userId);
+      if (!challengeToken || !otp) {
+        return res.status(400).json({
+          success: false,
+          message: "Verification token and OTP are required"
+        });
+      }
 
-    if (!user) {
-      return res.status(404).json({
-        success: false,
-        message: "User not found"
-      });
-    }
 
-    if (Number(user.email_verified) === 1) {
-      return res.json({
-        success: true,
-        message: "Email is already verified"
-      });
-    }
+      if (!/^\d{6}$/.test(String(otp).trim())) {
+        return res.status(400).json({
+          success: false,
+          message: "Please enter the 6-digit OTP"
+        });
+      }
 
-    const otpRow = db.prepare(`
-      SELECT *
-      FROM email_otps
-      WHERE user_id = ?
-        AND purpose = 'registration'
-        AND verified = 0
-      ORDER BY id DESC
-      LIMIT 1
-    `).get(user.id);
 
-    if (!otpRow) {
-      return res.status(400).json({
-        success: false,
-        message: "No active verification OTP found"
-      });
-    }
-
-    if (
-      new Date(otpRow.expires_at).getTime() < Date.now()
-    ) {
-      db.prepare(`
-        UPDATE email_otps
-        SET verified = 1
-        WHERE id = ?
-      `).run(otpRow.id);
-
-      return res.status(400).json({
-        success: false,
-        message: "OTP has expired. Please request a new OTP."
-      });
-    }
-
-    if (Number(otpRow.attempts) >= 5) {
-      return res.status(429).json({
-        success: false,
-        message: "Too many incorrect attempts. Please request a new OTP."
-      });
-    }
-
-    const submittedHash = hashOtp(
-      String(otp).trim()
-    );
-
-    if (submittedHash !== otpRow.otp_hash) {
-      db.prepare(`
-        UPDATE email_otps
-        SET attempts = attempts + 1
-        WHERE id = ?
-      `).run(otpRow.id);
-
-      const remainingAttempts =
-        Math.max(
-          0,
-          4 - Number(otpRow.attempts)
+      const decoded =
+        verifyChallengeToken(
+          challengeToken,
+          "registration"
         );
 
-      return res.status(400).json({
+
+      if (!decoded) {
+        return res.status(400).json({
+          success: false,
+          message: "Verification code has expired. Please register again."
+        });
+      }
+
+
+      const user = db.prepare(`
+        SELECT
+          id,
+          username,
+          email,
+          email_verified
+        FROM users
+        WHERE id = ?
+        LIMIT 1
+      `).get(
+        decoded.userId
+      );
+
+
+      if (!user) {
+        return res.status(404).json({
+          success: false,
+          message: "Registration account not found"
+        });
+      }
+
+
+      if (Number(user.email_verified) === 1) {
+        return res.status(400).json({
+          success: false,
+          message: "Email is already verified"
+        });
+      }
+
+
+      const otpRecord = db.prepare(`
+        SELECT *
+        FROM email_otps
+        WHERE user_id = ?
+          AND purpose = 'registration'
+          AND verified = 0
+        ORDER BY id DESC
+        LIMIT 1
+      `).get(
+        user.id
+      );
+
+
+      if (!otpRecord) {
+        return res.status(400).json({
+          success: false,
+          message: "Verification code not found"
+        });
+      }
+
+
+      if (
+        new Date(otpRecord.expires_at).getTime() <
+        Date.now()
+      ) {
+        return res.status(400).json({
+          success: false,
+          message: "Verification code has expired"
+        });
+      }
+
+
+      if (
+        Number(otpRecord.attempts) >=
+        MAX_OTP_ATTEMPTS
+      ) {
+        return res.status(429).json({
+          success: false,
+          message: "Too many incorrect attempts. Please register again."
+        });
+      }
+
+
+      const otpHash =
+        hashOtp(
+          String(otp).trim()
+        );
+
+
+      if (otpHash !== otpRecord.otp_hash) {
+
+        db.prepare(`
+          UPDATE email_otps
+          SET attempts = attempts + 1
+          WHERE id = ?
+        `).run(
+          otpRecord.id
+        );
+
+        return res.status(400).json({
+          success: false,
+          message: "Invalid verification code"
+        });
+      }
+
+
+      db.transaction(() => {
+
+        db.prepare(`
+          UPDATE email_otps
+          SET verified = 1
+          WHERE id = ?
+        `).run(
+          otpRecord.id
+        );
+
+
+        db.prepare(`
+          UPDATE users
+          SET email_verified = 1
+          WHERE id = ?
+        `).run(
+          user.id
+        );
+
+      })();
+
+
+      return res.json({
+        success: true,
+        message: "Email verified successfully. Please login."
+      });
+
+
+    } catch (error) {
+
+      console.error(
+        "REGISTRATION OTP VERIFY ERROR:",
+        error
+      );
+
+      return res.status(500).json({
         success: false,
-        message: `Incorrect OTP. ${remainingAttempts} attempts remaining.`
+        message: "OTP verification failed"
       });
     }
-
-    // Mark OTP verified
-    db.prepare(`
-      UPDATE email_otps
-      SET verified = 1
-      WHERE id = ?
-    `).run(otpRow.id);
-
-    // Verify user's email
-    db.prepare(`
-      UPDATE users
-      SET email_verified = 1
-      WHERE id = ?
-    `).run(user.id);
-
-    return res.json({
-      success: true,
-      message: "Email verified successfully. You can now login.",
-      user: {
-        id: user.id,
-        username: user.username,
-        email: user.email,
-        role: user.role,
-        referral_code: user.referral_code,
-        kyc_status: user.kyc_status,
-        email_verified: 1,
-        created_at: user.created_at
-      }
-    });
-
-  } catch (error) {
-    console.error(
-      "REGISTRATION OTP VERIFY ERROR:",
-      error
-    );
-
-    return res.status(500).json({
-      success: false,
-      message: "OTP verification failed"
-    });
   }
-});
+);
 
 
 /* =========================================================
    RESEND REGISTRATION OTP
 ========================================================= */
 
-router.post("/register/resend", async (req, res) => {
-  try {
-    const { challengeToken } = req.body;
-
-    if (!challengeToken) {
-      return res.status(400).json({
-        success: false,
-        message: "Verification token is required"
-      });
-    }
-
-    let decoded;
+router.post(
+  "/register/resend",
+  async (req, res) => {
 
     try {
-      decoded = jwt.verify(
-        challengeToken,
-        JWT_SECRET
-      );
-    } catch (error) {
-      return res.status(401).json({
-        success: false,
-        message: "Verification session expired. Please register again."
-      });
-    }
 
-    if (
-      decoded.purpose !== "registration_verification"
-    ) {
-      return res.status(401).json({
-        success: false,
-        message: "Invalid verification session"
-      });
-    }
+      const {
+        email
+      } = req.body;
 
-    const user = db.prepare(`
-      SELECT *
-      FROM users
-      WHERE id = ?
-      LIMIT 1
-    `).get(decoded.userId);
 
-    if (!user) {
-      return res.status(404).json({
-        success: false,
-        message: "User not found"
-      });
-    }
+      const normalizedEmail =
+        String(email || "")
+          .trim()
+          .toLowerCase();
 
-    if (Number(user.email_verified) === 1) {
-      return res.status(400).json({
-        success: false,
-        message: "Email is already verified"
-      });
-    }
 
-    const otp = generateOtp();
-    const otpHash = hashOtp(otp);
-    const expiresAt = createOtpExpiry();
-
-    // Invalidate old registration OTP
-    db.prepare(`
-      UPDATE email_otps
-      SET verified = 1
-      WHERE user_id = ?
-        AND purpose = 'registration'
-        AND verified = 0
-    `).run(user.id);
-
-    // Save new OTP
-    db.prepare(`
-      INSERT INTO email_otps (
-        user_id,
-        email,
-        otp_hash,
-        expires_at,
-        attempts,
-        verified,
-        purpose
-      )
-      VALUES (?, ?, ?, ?, 0, 0, 'registration')
-    `).run(
-      user.id,
-      user.email,
-      otpHash,
-      expiresAt
-    );
-
-    try {
-      await sendOtpEmail(
-        user.email,
-        otp
-      );
-    } catch (emailError) {
-      console.error(
-        "RESEND REGISTRATION OTP EMAIL ERROR:",
-        emailError
-      );
-
-      db.prepare(`
-        UPDATE email_otps
-        SET verified = 1
-        WHERE user_id = ?
-          AND purpose = 'registration'
-          AND verified = 0
-      `).run(user.id);
-
-      return res.status(500).json({
-        success: false,
-        message: "Unable to resend verification email"
-      });
-    }
-
-    const newChallengeToken = jwt.sign(
-      {
-        userId: user.id,
-        purpose: "registration_verification"
-      },
-      JWT_SECRET,
-      {
-        expiresIn: "10m"
+      if (!normalizedEmail) {
+        return res.status(400).json({
+          success: false,
+          message: "Email is required"
+        });
       }
-    );
 
-    return res.json({
-      success: true,
-      challengeToken: newChallengeToken,
-      message: "A new verification OTP has been sent.",
-      expiresIn: 600
-    });
 
-  } catch (error) {
-    console.error(
-      "RESEND REGISTRATION OTP ERROR:",
-      error
-    );
+      const user = db.prepare(`
+        SELECT
+          id,
+          email,
+          email_verified
+        FROM users
+        WHERE LOWER(email) = LOWER(?)
+        LIMIT 1
+      `).get(
+        normalizedEmail
+      );
 
-    return res.status(500).json({
-      success: false,
-      message: "Unable to resend OTP"
-    });
+
+      if (!user) {
+        return res.status(404).json({
+          success: false,
+          message: "Registration not found"
+        });
+      }
+
+
+      if (Number(user.email_verified) === 1) {
+        return res.status(400).json({
+          success: false,
+          message: "Email is already verified"
+        });
+      }
+
+
+      const challengeToken =
+        createChallengeToken(
+          user.id,
+          user.email,
+          "registration"
+        );
+
+
+      await sendOtp(
+        user.id,
+        user.email,
+        "registration"
+      );
+
+
+      return res.json({
+        success: true,
+        message: "Verification code sent again.",
+        challengeToken,
+        email: user.email
+      });
+
+
+    } catch (error) {
+
+      console.error(
+        "RESEND REGISTRATION OTP ERROR:",
+        error
+      );
+
+      return res.status(503).json({
+        success: false,
+        message: "Unable to send verification email"
+      });
+    }
   }
-});
+);
 
 
 /* =========================================================
@@ -608,170 +740,140 @@ router.post("/register/resend", async (req, res) => {
 ========================================================= */
 
 router.post("/login", async (req, res) => {
-  try {
-    let { username, password } = req.body;
 
-    username = String(username || "").trim();
+  try {
+
+    let {
+      email,
+      password
+    } = req.body;
+
+
+    email = String(email || "").trim().toLowerCase();
     password = String(password || "");
 
-    if (!username || !password) {
+
+    /* ---------------------------------------------
+       VALIDATION
+    --------------------------------------------- */
+
+    if (!email || !password) {
+
       return res.status(400).json({
         success: false,
-        message: "Username and password are required"
+        message: "Email and password are required"
       });
     }
+
+
+    /* ---------------------------------------------
+       FIND USER BY EMAIL
+    --------------------------------------------- */
 
     const user = db.prepare(`
       SELECT *
       FROM users
-      WHERE LOWER(username) = LOWER(?)
+      WHERE LOWER(email) = LOWER(?)
       LIMIT 1
-    `).get(username);
-
-    if (!user) {
-      return res.status(401).json({
-        success: false,
-        message: "Invalid username or password"
-      });
-    }
-
-    const passwordMatch = await bcrypt.compare(
-      password,
-      user.password_hash
+    `).get(
+      email
     );
 
-    if (!passwordMatch) {
+
+    if (!user) {
+
       return res.status(401).json({
         success: false,
-        message: "Invalid username or password"
+        message: "Invalid email or password"
       });
     }
 
-    // EMAIL VERIFICATION CHECK
+
+    /* ---------------------------------------------
+       EMAIL VERIFICATION
+    --------------------------------------------- */
+
     if (Number(user.email_verified) !== 1) {
+
       return res.status(403).json({
         success: false,
-        requiresEmailVerification: true,
         message: "Please verify your email before logging in."
       });
     }
 
-    /* =====================================================
-       LOGIN 2FA
-    ===================================================== */
 
-    if (Number(user.two_factor_enabled) === 1) {
-      const otp = generateOtp();
-      const otpHash = hashOtp(otp);
-      const expiresAt = createOtpExpiry();
+    /* ---------------------------------------------
+       PASSWORD
+    --------------------------------------------- */
 
-      // Invalidate previous login OTPs
-      db.prepare(`
-        UPDATE email_otps
-        SET verified = 1
-        WHERE user_id = ?
-          AND purpose = 'login_2fa'
-          AND verified = 0
-      `).run(user.id);
-
-      // Save new login OTP
-      db.prepare(`
-        INSERT INTO email_otps (
-          user_id,
-          email,
-          otp_hash,
-          expires_at,
-          attempts,
-          verified,
-          purpose
-        )
-        VALUES (?, ?, ?, ?, 0, 0, 'login_2fa')
-      `).run(
-        user.id,
-        user.email,
-        otpHash,
-        expiresAt
+    const passwordMatch =
+      await bcrypt.compare(
+        password,
+        user.password_hash
       );
 
-      try {
-        await sendOtpEmail(
-          user.email,
-          otp
-        );
-      } catch (emailError) {
-        console.error(
-          "LOGIN 2FA EMAIL ERROR:",
-          emailError
-        );
 
-        db.prepare(`
-          UPDATE email_otps
-          SET verified = 1
-          WHERE user_id = ?
-            AND purpose = 'login_2fa'
-            AND verified = 0
-        `).run(user.id);
+    if (!passwordMatch) {
 
-        return res.status(500).json({
-          success: false,
-          message: "Unable to send 2FA OTP"
-        });
-      }
-
-      const challengeToken = jwt.sign(
-        {
-          userId: user.id,
-          purpose: "login_2fa"
-        },
-        JWT_SECRET,
-        {
-          expiresIn: "10m"
-        }
-      );
-
-      return res.json({
-        success: true,
-        requiresTwoFactor: true,
-        challengeToken,
-        message: "2FA verification required",
-        expiresIn: 600
+      return res.status(401).json({
+        success: false,
+        message: "Invalid email or password"
       });
     }
 
-    /* =====================================================
-       NORMAL LOGIN
-    ===================================================== */
 
-    const token = jwt.sign(
-      {
-        userId: user.id,
-        username: user.username,
-        role: user.role
-      },
-      JWT_SECRET,
-      {
-        expiresIn: "7d"
-      }
-    );
+    /* ---------------------------------------------
+       CREATE LOGIN OTP
+    --------------------------------------------- */
+
+    const challengeToken =
+      createChallengeToken(
+        user.id,
+        user.email,
+        "login"
+      );
+
+
+    try {
+
+      await sendOtp(
+        user.id,
+        user.email,
+        "login"
+      );
+
+    } catch (emailError) {
+
+      console.error(
+        "LOGIN OTP EMAIL ERROR:",
+        emailError
+      );
+
+      return res.status(503).json({
+        success: false,
+        message: "Unable to send login verification code. Please try again."
+      });
+    }
+
+
+    /* ---------------------------------------------
+       OTP REQUIRED
+    --------------------------------------------- */
 
     return res.json({
       success: true,
-      message: "Login successful",
-      token,
-      user: {
-        id: user.id,
-        username: user.username,
-        email: user.email,
-        role: user.role,
-        referral_code: user.referral_code,
-        kyc_status: user.kyc_status,
-        email_verified: user.email_verified,
-        created_at: user.created_at
-      }
+      message: "Verification code sent to your email.",
+      requiresTwoFactor: true,
+      challengeToken
     });
 
+
   } catch (error) {
-    console.error("LOGIN ERROR:", error);
+
+    console.error(
+      "LOGIN ERROR:",
+      error
+    );
 
     return res.status(500).json({
       success: false,
@@ -781,209 +883,500 @@ router.post("/login", async (req, res) => {
 });
 
 
+/* =========================================================
+   LOGIN OTP VERIFY
+========================================================= */
 
-// ==================== FORGOT PASSWORD ====================
-
-router.post("/forgot-password", async (req, res) => {
-  try {
-    const { email } = req.body;
-
-    if (!email || !email.trim()) {
-      return res.status(400).json({
-        success: false,
-        message: "Email is required."
-      });
-    }
-
-    const normalizedEmail = email.trim().toLowerCase();
-
-    const user = db
-      .prepare("SELECT id, username, email FROM users WHERE LOWER(email) = ?")
-      .get(normalizedEmail);
-
-    // Do not reveal whether an email exists.
-    if (!user) {
-      return res.json({
-        success: true,
-        message: "If this email is registered, a verification code has been sent."
-      });
-    }
-
-    const otp = generateOtp();
-    const otpHash = hashOtp(otp);
-    const expiresAt = createOtpExpiry();
-
-    db.prepare(`
-      UPDATE email_otps
-      SET verified = 1
-      WHERE user_id = ?
-        AND purpose = 'password_reset'
-        AND verified = 0
-    `).run(user.id);
-
-    db.prepare(`
-      INSERT INTO email_otps
-      (user_id, email, otp_hash, expires_at, verified, purpose, attempts, created_at)
-      VALUES (?, ?, ?, ?, 0, 'password_reset', 0, datetime('now'))
-    `).run(
-      user.id,
-      user.email,
-      otpHash,
-      expiresAt
-    );
-
-    await sendOtpEmail(user.email, otp);
-
-    const challengeToken = jwt.sign(
-      {
-        userId: user.id,
-        purpose: "password_reset"
-      },
-      process.env.JWT_SECRET,
-      { expiresIn: "10m" }
-    );
-
-    return res.json({
-      success: true,
-      message: "If this email is registered, a verification code has been sent.",
-      challengeToken,
-      expiresIn: 600
-    });
-  } catch (error) {
-    console.error("FORGOT PASSWORD ERROR:", error);
-
-    return res.status(500).json({
-      success: false,
-      message: "Unable to send password reset code."
-    });
-  }
-});
-
-router.post("/forgot-password/verify", async (req, res) => {
-  try {
-    const { challengeToken, otp, newPassword } = req.body;
-
-    if (!challengeToken || !otp || !newPassword) {
-      return res.status(400).json({
-        success: false,
-        message: "Verification code and new password are required."
-      });
-    }
-
-    if (!/^\d{6}$/.test(String(otp).trim())) {
-      return res.status(400).json({
-        success: false,
-        message: "Please enter the 6-digit OTP."
-      });
-    }
-
-    if (String(newPassword).length < 8) {
-      return res.status(400).json({
-        success: false,
-        message: "New password must be at least 8 characters."
-      });
-    }
-
-    let payload;
+router.post(
+  "/otp/2fa/login/verify",
+  async (req, res) => {
 
     try {
-      payload = jwt.verify(
+
+      const {
         challengeToken,
-        process.env.JWT_SECRET
+        otp
+      } = req.body;
+
+
+      if (!challengeToken || !otp) {
+        return res.status(400).json({
+          success: false,
+          message: "Verification token and OTP are required"
+        });
+      }
+
+
+      if (!/^\d{6}$/.test(String(otp).trim())) {
+        return res.status(400).json({
+          success: false,
+          message: "Please enter the 6-digit OTP"
+        });
+      }
+
+
+      const decoded =
+        verifyChallengeToken(
+          challengeToken,
+          "login"
+        );
+
+
+      if (!decoded) {
+        return res.status(400).json({
+          success: false,
+          message: "Login verification code has expired. Please login again."
+        });
+      }
+
+
+      const user = db.prepare(`
+        SELECT *
+        FROM users
+        WHERE id = ?
+        LIMIT 1
+      `).get(
+        decoded.userId
       );
-    } catch {
-      return res.status(400).json({
-        success: false,
-        message: "Reset session expired. Please request a new OTP."
-      });
-    }
 
-    if (payload.purpose !== "password_reset") {
-      return res.status(400).json({
-        success: false,
-        message: "Invalid password reset session."
-      });
-    }
 
-    const record = db.prepare(`
-      SELECT *
-      FROM email_otps
-      WHERE user_id = ?
-        AND purpose = 'password_reset'
-        AND verified = 0
-      ORDER BY id DESC
-      LIMIT 1
-    `).get(payload.userId);
+      if (!user) {
+        return res.status(404).json({
+          success: false,
+          message: "User not found"
+        });
+      }
 
-    if (!record) {
-      return res.status(400).json({
-        success: false,
-        message: "OTP not found. Please request a new code."
-      });
-    }
 
-    if (new Date(record.expires_at).getTime() < Date.now()) {
-      return res.status(400).json({
-        success: false,
-        message: "OTP has expired. Please request a new code."
-      });
-    }
+      const otpRecord = db.prepare(`
+        SELECT *
+        FROM email_otps
+        WHERE user_id = ?
+          AND purpose = 'login'
+          AND verified = 0
+        ORDER BY id DESC
+        LIMIT 1
+      `).get(
+        user.id
+      );
 
-    if ((record.attempts || 0) >= 5) {
-      return res.status(429).json({
-        success: false,
-        message: "Too many incorrect attempts. Please request a new code."
-      });
-    }
 
-    const incomingHash = hashOtp(String(otp).trim());
+      if (!otpRecord) {
+        return res.status(400).json({
+          success: false,
+          message: "Login verification code not found"
+        });
+      }
 
-    if (incomingHash !== record.otp_hash) {
-      db.prepare(`
-        UPDATE email_otps
-        SET attempts = attempts + 1
-        WHERE id = ?
-      `).run(record.id);
 
-      return res.status(400).json({
-        success: false,
-        message: "Invalid verification code."
-      });
-    }
+      if (
+        new Date(otpRecord.expires_at).getTime() <
+        Date.now()
+      ) {
+        return res.status(400).json({
+          success: false,
+          message: "Login verification code has expired"
+        });
+      }
 
-    const passwordHash = await bcrypt.hash(
-      String(newPassword),
-      12
-    );
 
-    const transaction = db.transaction(() => {
-      db.prepare(`
-        UPDATE users
-        SET password_hash = ?
-        WHERE id = ?
-      `).run(passwordHash, payload.userId);
+      if (
+        Number(otpRecord.attempts) >=
+        MAX_OTP_ATTEMPTS
+      ) {
+        return res.status(429).json({
+          success: false,
+          message: "Too many incorrect attempts. Please login again."
+        });
+      }
+
+
+      const otpHash =
+        hashOtp(
+          String(otp).trim()
+        );
+
+
+      if (otpHash !== otpRecord.otp_hash) {
+
+        db.prepare(`
+          UPDATE email_otps
+          SET attempts = attempts + 1
+          WHERE id = ?
+        `).run(
+          otpRecord.id
+        );
+
+        return res.status(400).json({
+          success: false,
+          message: "Invalid verification code"
+        });
+      }
+
 
       db.prepare(`
         UPDATE email_otps
         SET verified = 1
         WHERE id = ?
-      `).run(record.id);
-    });
+      `).run(
+        otpRecord.id
+      );
 
-    transaction();
 
-    return res.json({
-      success: true,
-      message: "Password reset successfully. Please login with your new password."
-    });
-  } catch (error) {
-    console.error("PASSWORD RESET VERIFY ERROR:", error);
+      /* ---------------------------------------------
+         CREATE FINAL LOGIN TOKEN
+      --------------------------------------------- */
 
-    return res.status(500).json({
-      success: false,
-      message: "Unable to reset password."
-    });
+      const token = jwt.sign(
+        {
+          userId: user.id,
+          username: user.username,
+          role: user.role
+        },
+        JWT_SECRET,
+        {
+          expiresIn: "7d"
+        }
+      );
+
+
+      return res.json({
+        success: true,
+        message: "Login successful",
+        token,
+        user: {
+          id: user.id,
+          username: user.username,
+          email: user.email,
+          role: user.role,
+          referral_code: user.referral_code,
+          kyc_status: user.kyc_status,
+          email_verified: 1,
+          created_at: user.created_at
+        }
+      });
+
+
+    } catch (error) {
+
+      console.error(
+        "LOGIN OTP VERIFY ERROR:",
+        error
+      );
+
+      return res.status(500).json({
+        success: false,
+        message: "OTP verification failed"
+      });
+    }
   }
-});
+);
+
+
+/* =========================================================
+   FORGOT PASSWORD
+========================================================= */
+
+router.post(
+  "/forgot-password",
+  async (req, res) => {
+
+    try {
+
+      const email =
+        String(req.body.email || "")
+          .trim()
+          .toLowerCase();
+
+
+      if (!email) {
+        return res.status(400).json({
+          success: false,
+          message: "Email is required"
+        });
+      }
+
+
+      const user = db.prepare(`
+        SELECT
+          id,
+          email,
+          email_verified
+        FROM users
+        WHERE LOWER(email) = LOWER(?)
+        LIMIT 1
+      `).get(
+        email
+      );
+
+
+      if (!user) {
+        return res.status(404).json({
+          success: false,
+          message: "No account found with this email"
+        });
+      }
+
+
+      if (Number(user.email_verified) !== 1) {
+        return res.status(403).json({
+          success: false,
+          message: "Please verify your email first."
+        });
+      }
+
+
+      const challengeToken =
+        createChallengeToken(
+          user.id,
+          user.email,
+          "forgot_password"
+        );
+
+
+      try {
+
+        await sendOtp(
+          user.id,
+          user.email,
+          "forgot_password"
+        );
+
+      } catch (emailError) {
+
+        console.error(
+          "FORGOT PASSWORD OTP EMAIL ERROR:",
+          emailError
+        );
+
+        return res.status(503).json({
+          success: false,
+          message: "Unable to send password reset code"
+        });
+      }
+
+
+      return res.json({
+        success: true,
+        message: "Password reset code sent to your email.",
+        challengeToken
+      });
+
+
+    } catch (error) {
+
+      console.error(
+        "FORGOT PASSWORD ERROR:",
+        error
+      );
+
+      return res.status(500).json({
+        success: false,
+        message: "Unable to process password reset"
+      });
+    }
+  }
+);
+
+
+/* =========================================================
+   PASSWORD RESET VERIFY
+========================================================= */
+
+router.post(
+  "/forgot-password/verify",
+  async (req, res) => {
+
+    try {
+
+      const {
+        challengeToken,
+        otp,
+        newPassword
+      } = req.body;
+
+
+      if (
+        !challengeToken ||
+        !otp ||
+        !newPassword
+      ) {
+        return res.status(400).json({
+          success: false,
+          message: "Verification token, OTP and new password are required"
+        });
+      }
+
+
+      if (!/^\d{6}$/.test(String(otp).trim())) {
+        return res.status(400).json({
+          success: false,
+          message: "Please enter the 6-digit OTP"
+        });
+      }
+
+
+      if (String(newPassword).length < 8) {
+        return res.status(400).json({
+          success: false,
+          message: "New password must be at least 8 characters"
+        });
+      }
+
+
+      const decoded =
+        verifyChallengeToken(
+          challengeToken,
+          "forgot_password"
+        );
+
+
+      if (!decoded) {
+        return res.status(400).json({
+          success: false,
+          message: "Password reset code has expired. Please request a new code."
+        });
+      }
+
+
+      const user = db.prepare(`
+        SELECT *
+        FROM users
+        WHERE id = ?
+        LIMIT 1
+      `).get(
+        decoded.userId
+      );
+
+
+      if (!user) {
+        return res.status(404).json({
+          success: false,
+          message: "User not found"
+        });
+      }
+
+
+      const otpRecord = db.prepare(`
+        SELECT *
+        FROM email_otps
+        WHERE user_id = ?
+          AND purpose = 'forgot_password'
+          AND verified = 0
+        ORDER BY id DESC
+        LIMIT 1
+      `).get(
+        user.id
+      );
+
+
+      if (!otpRecord) {
+        return res.status(400).json({
+          success: false,
+          message: "Password reset code not found"
+        });
+      }
+
+
+      if (
+        new Date(otpRecord.expires_at).getTime() <
+        Date.now()
+      ) {
+        return res.status(400).json({
+          success: false,
+          message: "Password reset code has expired"
+        });
+      }
+
+
+      if (
+        Number(otpRecord.attempts) >=
+        MAX_OTP_ATTEMPTS
+      ) {
+        return res.status(429).json({
+          success: false,
+          message: "Too many incorrect attempts. Please request a new code."
+        });
+      }
+
+
+      const otpHash =
+        hashOtp(
+          String(otp).trim()
+        );
+
+
+      if (otpHash !== otpRecord.otp_hash) {
+
+        db.prepare(`
+          UPDATE email_otps
+          SET attempts = attempts + 1
+          WHERE id = ?
+        `).run(
+          otpRecord.id
+        );
+
+        return res.status(400).json({
+          success: false,
+          message: "Invalid verification code"
+        });
+      }
+
+
+      const passwordHash =
+        await bcrypt.hash(
+          String(newPassword),
+          12
+        );
+
+
+      db.transaction(() => {
+
+        db.prepare(`
+          UPDATE email_otps
+          SET verified = 1
+          WHERE id = ?
+        `).run(
+          otpRecord.id
+        );
+
+
+        db.prepare(`
+          UPDATE users
+          SET password_hash = ?
+          WHERE id = ?
+        `).run(
+          passwordHash,
+          user.id
+        );
+
+      })();
+
+
+      return res.json({
+        success: true,
+        message: "Password reset successfully. Please login."
+      });
+
+
+    } catch (error) {
+
+      console.error(
+        "PASSWORD RESET VERIFY ERROR:",
+        error
+      );
+
+      return res.status(500).json({
+        success: false,
+        message: "Password reset failed"
+      });
+    }
+  }
+);
+
+
+/* =========================================================
+   EXPORT
+========================================================= */
 
 module.exports = router;
