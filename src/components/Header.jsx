@@ -4,6 +4,17 @@ function Header() {
   const [showNotifications, setShowNotifications] = useState(false);
   const [showProfile, setShowProfile] = useState(false);
 
+  const storedUser = localStorage.getItem("love_user");
+
+  let username = "User";
+
+  try {
+    const user = storedUser ? JSON.parse(storedUser) : null;
+    username = user?.username || user?.name || "User";
+  } catch {
+    username = "User";
+  }
+
   const toggleNotifications = () => {
     setShowNotifications((current) => !current);
     setShowProfile(false);
@@ -28,7 +39,7 @@ function Header() {
 
         <div>
           <h2>LOVE Network</h2>
-          <p>Welcome back, Hamdan</p>
+          <p>Welcome back, {username}</p>
         </div>
       </div>
 
@@ -58,12 +69,12 @@ function Header() {
             onClick={toggleProfile}
             aria-label="Profile"
           >
-            HI
+            {username.charAt(0).toUpperCase()}
           </button>
 
           {showProfile && (
             <div className="header-dropdown profile-dropdown">
-              <strong>Hamdan</strong>
+              <strong>{username}</strong>
               <p>LOVE Network Member</p>
 
               <button type="button">
