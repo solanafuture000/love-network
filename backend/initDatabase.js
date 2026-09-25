@@ -1,3 +1,4 @@
+
 const db = require("./database");
 
 function addColumnIfMissing(table, column, definition) {
@@ -52,12 +53,12 @@ db.exec(`
 
   CREATE TABLE IF NOT EXISTS mining_config (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    total_mining_allocation REAL DEFAULT 400000000,
+    total_mining_allocation REAL DEFAULT 100000000,
     total_mined REAL DEFAULT 0,
-    phase1_limit REAL DEFAULT 100000000,
-    phase2_limit REAL DEFAULT 200000000,
-    phase3_limit REAL DEFAULT 300000000,
-    phase4_limit REAL DEFAULT 400000000,
+    phase1_limit REAL DEFAULT 25000000,
+    phase2_limit REAL DEFAULT 50000000,
+    phase3_limit REAL DEFAULT 75000000,
+    phase4_limit REAL DEFAULT 100000000,
     phase1_rate REAL DEFAULT 0.010,
     phase2_rate REAL DEFAULT 0.0075,
     phase3_rate REAL DEFAULT 0.005,
@@ -145,6 +146,7 @@ addColumnIfMissing("email_otps", "attempts", "INTEGER DEFAULT 0");
 /*
   Make sure existing OTP rows have safe default values.
 */
+
 db.prepare(`
   UPDATE email_otps
   SET attempts = 0
@@ -162,5 +164,50 @@ db.prepare(`
   SET two_factor_enabled = 0
   WHERE two_factor_enabled IS NULL
 `).run();
+
+/*
+  Create the default mining configuration if it does not exist.
+  This is important for fresh Render deployments where the database
+  starts empty and setupMiningEmission.js has not been run manually.
+*/
+
+const miningConfig = db
+  .prepare(`SELECT id FROM mining_config WHERE id = 1`)
+  .get();
+
+if (!miningConfig) {
+  db.prepare(`
+    INSERT INTO mining_config (
+      id,
+      total_mining_allocation,
+      total_mined,
+      phase1_limit,
+      phase2_limit,
+      phase3_limit,
+      phase4_limit,
+      phase1_rate,
+      phase2_rate,
+      phase3_rate,
+      phase4_rate,
+      mining_enabled
+    )
+    VALUES (
+      1,
+      100000000,
+      0,
+      25000000,
+      50000000,
+      75000000,
+      100000000,
+      0.010,
+      0.0075,
+      0.005,
+      0.0025,
+      1
+    )
+  `).run();
+
+  console.log("LOVE Network default mining configuration created");
+}
 
 console.log("LOVE Network database schema initialized");

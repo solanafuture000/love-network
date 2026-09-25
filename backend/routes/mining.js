@@ -146,7 +146,11 @@ function settleMiningSession(session, userId) {
       (Number(wallet.balance) + reward).toFixed(8)
     );
 
-    const newTotalMined = Number(
+    const newWalletTotalMined = Number(
+      (Number(wallet.total_mined) + reward).toFixed(8)
+    );
+
+    const newGlobalTotalMined = Number(
       (Number(config.total_mined) + reward).toFixed(8)
     );
 
@@ -159,7 +163,7 @@ function settleMiningSession(session, userId) {
       WHERE user_id = ?
     `).run(
       newBalance,
-      newTotalMined,
+      newWalletTotalMined,
       userId
     );
 
@@ -323,7 +327,7 @@ function settleMiningSession(session, userId) {
     db.prepare("UPDATE users SET successful_mining_sessions = successful_mining_sessions + 1, last_mining_date = date('now') WHERE id = ?").run(userId);
 
     if (
-      newTotalMined >=
+      newGlobalTotalMined >=
       Number(config.total_mining_allocation)
     ) {
       db.prepare(`
@@ -333,7 +337,7 @@ function settleMiningSession(session, userId) {
           mining_enabled = 0,
           updated_at = CURRENT_TIMESTAMP
         WHERE id = 1
-      `).run(newTotalMined);
+      `).run(newGlobalTotalMined);
     } else {
       db.prepare(`
         UPDATE mining_config
@@ -341,7 +345,7 @@ function settleMiningSession(session, userId) {
           total_mined = ?,
           updated_at = CURRENT_TIMESTAMP
         WHERE id = 1
-      `).run(newTotalMined);
+      `).run(newGlobalTotalMined);
     }
   });
 
@@ -944,6 +948,7 @@ router.get("/dashboard", authenticateToken, (req, res) => {
 });
 
 module.exports = router;
+
 
 
 
