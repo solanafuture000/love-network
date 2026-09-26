@@ -1,8 +1,9 @@
-﻿const express = require("express");
+const express = require("express");
 const bcrypt = require("bcrypt");
 const jwt = require("jsonwebtoken");
 const crypto = require("crypto");
-const db = require("../database");
+
+const db = require("../database-pg");
 const { sendOtpEmail } = require("../services/otpService");
 
 const router = express.Router();
@@ -25,6 +26,75 @@ function generateReferralCode(username, userId) {
     .slice(0, 8) || "LOVE";
 
   return `${base}${userId}`;
+}
+
+
+/* =========================================================
+   MOBILE HELPERS
+========================================================= */
+
+function normalizeCountryCode(value) {
+  let code = String(value || "").trim();
+
+  code = code.replace(/[^\d+]/g, "");
+
+  if (!code) {
+    return "";
+  }
+
+  if (!code.startsWith("+")) {
+    code = `+${code}`;
+  }
+
+  return code;
+}
+
+
+function normalizeMobile(value, countryCode = "") {
+  let mobile = String(value || "").trim();
+
+  mobile = mobile.replace(/[^\d+]/g, "");
+
+  if (!mobile) {
+    return "";
+  }
+
+  /*
+    react-phone-number-input normally returns E.164:
+
+    +923001234567
+
+    If a plain national number is received,
+    country code will be added automatically.
+  */
+
+  if (!mobile.startsWith("+")) {
+    const normalizedCode =
+      normalizeCountryCode(countryCode);
+
+    const nationalNumber =
+      mobile.replace(/\D/g, "");
+
+    mobile =
+      `${normalizedCode}${nationalNumber}`;
+  }
+
+  return mobile;
+}
+
+
+function isValidCountryCode(countryCode) {
+  return /^\+\d{1,4}$/.test(countryCode);
+}
+
+
+function isValidMobile(mobile) {
+  /*
+    E.164 maximum is 15 digits including country code.
+    Minimum kept at 7 digits to support international numbers.
+  */
+
+  return /^\+\d{7,15}$/.test(mobile);
 }
 
 
@@ -60,7 +130,10 @@ function createChallengeToken(userId, email, purpose) {
 }
 
 
-function verifyChallengeToken(challengeToken, expectedPurpose) {
+function verifyChallengeToken(
+  challengeToken,
+  expectedPurpose
+) {
   try {
     const decoded = jwt.verify(
       challengeToken,
@@ -78,15 +151,21 @@ function verifyChallengeToken(challengeToken, expectedPurpose) {
 }
 
 
-function createOtpRecord(userId, email, purpose) {
+async function createOtpRecord(
+  userId,
+  email,
+  purpose
+) {
   const otp = generateOtp();
   const otpHash = hashOtp(otp);
 
   const expiresAt = new Date(
-    Date.now() + OTP_EXPIRY_MINUTES * 60 * 1000
-  ).toISOString();
+    Date.now() +
+      OTP_EXPIRY_MINUTES * 60 * 1000
+  );
 
-  db.prepare(`
+  await db.query(
+    `
     INSERT INTO email_otps (
       user_id,
       email,
@@ -96,21 +175,27 @@ function createOtpRecord(userId, email, purpose) {
       verified,
       purpose
     )
-    VALUES (?, ?, ?, ?, 0, 0, ?)
-  `).run(
-    userId,
-    email,
-    otpHash,
-    expiresAt,
-    purpose
+    VALUES ($1, $2, $3, $4, 0, FALSE, $5)
+    `,
+    [
+      userId,
+      email,
+      otpHash,
+      expiresAt,
+      purpose
+    ]
   );
 
   return otp;
 }
 
 
-async function sendOtp(userId, email, purpose) {
-  const otp = createOtpRecord(
+async function sendOtp(
+  userId,
+  email,
+  purpose
+) {
+  const otp = await createOtpRecord(
     userId,
     email,
     purpose
@@ -127,166 +212,299 @@ async function sendOtp(userId, email, purpose) {
    REGISTER
 ========================================================= */
 
-router.post("/register", async (req, res) => {
-  try {
-    let {
-      username,
-      email,
-      password,
-      referralCode
-    } = req.body;
+router.post(
+  "/register",
+  async (req, res) => {
+    let client;
 
-    username = String(username || "").trim();
-    email = String(email || "").trim().toLowerCase();
-    password = String(password || "");
-    referralCode = String(referralCode || "")
-      .trim()
-      .toUpperCase();
-
-
-    /* ---------------------------------------------
-       VALIDATION
-    --------------------------------------------- */
-
-    if (!username || !email || !password) {
-      return res.status(400).json({
-        success: false,
-        message: "Username, email and password are required"
-      });
-    }
-
-
-    if (username.length < 3 || username.length > 30) {
-      return res.status(400).json({
-        success: false,
-        message: "Username must be between 3 and 30 characters"
-      });
-    }
-
-
-    if (password.length < 6) {
-      return res.status(400).json({
-        success: false,
-        message: "Password must be at least 6 characters"
-      });
-    }
-
-
-    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
-      return res.status(400).json({
-        success: false,
-        message: "Please enter a valid email address"
-      });
-    }
-
-
-    /* ---------------------------------------------
-       CHECK EXISTING USER
-    --------------------------------------------- */
-
-    const existingUser = db.prepare(`
-      SELECT
-        id,
+    try {
+      let {
         username,
         email,
-        email_verified
-      FROM users
-      WHERE LOWER(username) = LOWER(?)
-         OR LOWER(email) = LOWER(?)
-      LIMIT 1
-    `).get(
-      username,
-      email
-    );
+        password,
+        referralCode,
+        countryCode,
+        mobile
+      } = req.body;
+
+      username =
+        String(username || "").trim();
+
+      email =
+        String(email || "")
+          .trim()
+          .toLowerCase();
+
+      password =
+        String(password || "");
+
+      referralCode =
+        String(referralCode || "")
+          .trim()
+          .toUpperCase();
+
+      countryCode =
+        normalizeCountryCode(countryCode);
+
+      mobile =
+        normalizeMobile(
+          mobile,
+          countryCode
+        );
 
 
-    if (existingUser) {
+      /* ---------------------------------------------
+         VALIDATION
+      --------------------------------------------- */
 
       if (
-        String(existingUser.email || "").toLowerCase() === email &&
-        Number(existingUser.email_verified) === 0
+        !username ||
+        !email ||
+        !password ||
+        !countryCode ||
+        !mobile
       ) {
-        return res.status(409).json({
-          success: false,
-          message: "This email is already registered but not verified. Please complete email verification."
-        });
-      }
-
-      return res.status(409).json({
-        success: false,
-        message: "Username or email already exists"
-      });
-    }
-
-
-    /* ---------------------------------------------
-       REFERRAL
-    --------------------------------------------- */
-
-    let referrer = null;
-
-    if (referralCode) {
-      referrer = db.prepare(`
-        SELECT
-          id,
-          username
-        FROM users
-        WHERE UPPER(referral_code) = UPPER(?)
-        LIMIT 1
-      `).get(referralCode);
-
-
-      if (!referrer) {
         return res.status(400).json({
           success: false,
-          message: "Invalid referral code"
+          message:
+            "Username, email, country code, mobile and password are required"
         });
       }
-    }
 
 
-    /* ---------------------------------------------
-       PASSWORD HASH
-    --------------------------------------------- */
+      if (
+        username.length < 3 ||
+        username.length > 30
+      ) {
+        return res.status(400).json({
+          success: false,
+          message:
+            "Username must be between 3 and 30 characters"
+        });
+      }
 
-    const passwordHash = await bcrypt.hash(
-      password,
-      12
-    );
+
+      if (password.length < 6) {
+        return res.status(400).json({
+          success: false,
+          message:
+            "Password must be at least 6 characters"
+        });
+      }
 
 
-    /* ---------------------------------------------
-       CREATE PENDING USER
-    --------------------------------------------- */
-
-    const createUser = db.transaction(() => {
-
-      const result = db.prepare(`
-        INSERT INTO users (
-          username,
-          email,
-          password_hash,
-          role,
-          kyc_status,
-          email_verified,
-          two_factor_enabled
+      if (
+        !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(
+          email
         )
-        VALUES (?, ?, ?, 'USER', 'not_started', 0, 1)
-      `).run(
-        username,
-        email,
-        passwordHash
-      );
+      ) {
+        return res.status(400).json({
+          success: false,
+          message:
+            "Please enter a valid email address"
+        });
+      }
 
 
-      const userId = Number(
-        result.lastInsertRowid
-      );
+      if (
+        !isValidCountryCode(countryCode)
+      ) {
+        return res.status(400).json({
+          success: false,
+          message:
+            "Please select a valid country code"
+        });
+      }
 
 
-      /* -----------------------------------------
-         GENERATE REFERRAL CODE
-      ----------------------------------------- */
+      if (!isValidMobile(mobile)) {
+        return res.status(400).json({
+          success: false,
+          message:
+            "Please enter a valid international mobile number"
+        });
+      }
+
+
+      if (
+        !mobile.startsWith(countryCode)
+      ) {
+        return res.status(400).json({
+          success: false,
+          message:
+            "Mobile number does not match the selected country code"
+        });
+      }
+
+
+      /* ---------------------------------------------
+         CHECK EXISTING USER
+      --------------------------------------------- */
+
+      const existingUserResult =
+        await db.query(
+          `
+          SELECT
+            id,
+            username,
+            email,
+            mobile,
+            email_verified
+          FROM users
+          WHERE LOWER(username) = LOWER($1)
+             OR LOWER(email) = LOWER($2)
+             OR mobile = $3
+          LIMIT 1
+          `,
+          [
+            username,
+            email,
+            mobile
+          ]
+        );
+
+      const existingUser =
+        existingUserResult.rows[0];
+
+
+      if (existingUser) {
+
+        if (
+          String(
+            existingUser.email || ""
+          ).toLowerCase() === email &&
+          existingUser.email_verified === false
+        ) {
+          return res.status(409).json({
+            success: false,
+            message:
+              "This email is already registered but not verified. Please complete email verification."
+          });
+        }
+
+
+        if (
+          existingUser.mobile === mobile
+        ) {
+          return res.status(409).json({
+            success: false,
+            message:
+              "This mobile number is already registered"
+          });
+        }
+
+
+        return res.status(409).json({
+          success: false,
+          message:
+            "Username or email already exists"
+        });
+      }
+
+
+      /* ---------------------------------------------
+         REFERRAL
+      --------------------------------------------- */
+
+      let referrer = null;
+
+      if (referralCode) {
+
+        const referrerResult =
+          await db.query(
+            `
+            SELECT
+              id,
+              username
+            FROM users
+            WHERE UPPER(referral_code) = UPPER($1)
+            LIMIT 1
+            `,
+            [
+              referralCode
+            ]
+          );
+
+        referrer =
+          referrerResult.rows[0] ||
+          null;
+
+
+        if (!referrer) {
+          return res.status(400).json({
+            success: false,
+            message:
+              "Invalid referral code"
+          });
+        }
+      }
+
+
+      /* ---------------------------------------------
+         PASSWORD HASH
+      --------------------------------------------- */
+
+      const passwordHash =
+        await bcrypt.hash(
+          password,
+          12
+        );
+
+
+      /* ---------------------------------------------
+         CREATE USER + WALLET + REFERRAL
+      --------------------------------------------- */
+
+      client =
+        await db.pool.connect();
+
+      await client.query("BEGIN");
+
+
+      const createUserResult =
+        await client.query(
+          `
+          INSERT INTO users (
+            username,
+            email,
+            country_code,
+            mobile,
+            password_hash,
+            role,
+            kyc_status,
+            email_verified,
+            two_factor_enabled
+          )
+          VALUES (
+            $1,
+            $2,
+            $3,
+            $4,
+            $5,
+            'USER',
+            'not_started',
+            FALSE,
+            TRUE
+          )
+          RETURNING id
+          `,
+          [
+            username,
+            email,
+            countryCode,
+            mobile,
+            passwordHash
+          ]
+        );
+
+
+      const userId =
+        createUserResult.rows[0].id;
+
+
+      /* ---------------------------------------------
+         GENERATE UNIQUE REFERRAL CODE
+      --------------------------------------------- */
 
       let generatedReferralCode =
         generateReferralCode(
@@ -295,19 +513,26 @@ router.post("/register", async (req, res) => {
         );
 
 
-      let codeExists = db.prepare(`
-        SELECT id
-        FROM users
-        WHERE referral_code = ?
-      `).get(
-        generatedReferralCode
-      );
+      let codeExistsResult =
+        await client.query(
+          `
+          SELECT id
+          FROM users
+          WHERE referral_code = $1
+          LIMIT 1
+          `,
+          [
+            generatedReferralCode
+          ]
+        );
 
 
       let counter = 1;
 
 
-      while (codeExists) {
+      while (
+        codeExistsResult.rows.length > 0
+      ) {
 
         generatedReferralCode =
           `${generateReferralCode(
@@ -316,53 +541,65 @@ router.post("/register", async (req, res) => {
           )}${counter++}`;
 
 
-        codeExists = db.prepare(`
-          SELECT id
-          FROM users
-          WHERE referral_code = ?
-        `).get(
-          generatedReferralCode
-        );
+        codeExistsResult =
+          await client.query(
+            `
+            SELECT id
+            FROM users
+            WHERE referral_code = $1
+            LIMIT 1
+            `,
+            [
+              generatedReferralCode
+            ]
+          );
       }
 
 
-      /* -----------------------------------------
+      /* ---------------------------------------------
          SAVE REFERRAL CODE
-      ----------------------------------------- */
+      --------------------------------------------- */
 
-      db.prepare(`
+      await client.query(
+        `
         UPDATE users
-        SET referral_code = ?
-        WHERE id = ?
-      `).run(
-        generatedReferralCode,
-        userId
+        SET referral_code = $1
+        WHERE id = $2
+        `,
+        [
+          generatedReferralCode,
+          userId
+        ]
       );
 
 
-      /* -----------------------------------------
+      /* ---------------------------------------------
          CREATE WALLET
-      ----------------------------------------- */
+      --------------------------------------------- */
 
-      db.prepare(`
+      await client.query(
+        `
         INSERT INTO wallets (
           user_id,
           balance,
           total_mined
         )
-        VALUES (?, 0, 0)
-      `).run(
-        userId
+        VALUES ($1, 0, 0)
+        `,
+        [
+          userId
+        ]
       );
 
 
-      /* -----------------------------------------
+      /* ---------------------------------------------
          CREATE REFERRAL RELATIONSHIP
-      ----------------------------------------- */
+      --------------------------------------------- */
 
       if (referrer) {
 
-        db.prepare(`
+        await client.query(
+          `
           INSERT INTO referrals (
             referrer_user_id,
             referred_user_id,
@@ -370,85 +607,139 @@ router.post("/register", async (req, res) => {
             reward_rate,
             total_reward
           )
-          VALUES (?, ?, 'PENDING_KYC', 0, 0)
-        `).run(
-          referrer.id,
-          userId
+          VALUES (
+            $1,
+            $2,
+            'PENDING_KYC',
+            0,
+            0
+          )
+          `,
+          [
+            referrer.id,
+            userId
+          ]
         );
       }
 
 
-      return userId;
-    });
+      await client.query("COMMIT");
+
+      client.release();
+      client = null;
 
 
-    const userId = createUser();
+      /* ---------------------------------------------
+         CREATE OTP
+      --------------------------------------------- */
+
+      const challengeToken =
+        createChallengeToken(
+          userId,
+          email,
+          "registration"
+        );
 
 
-    /* ---------------------------------------------
-       CREATE OTP
-    --------------------------------------------- */
+      /* ---------------------------------------------
+         SEND REGISTRATION OTP
+      --------------------------------------------- */
 
-    const challengeToken =
-      createChallengeToken(
-        userId,
+      try {
+
+        await sendOtp(
+          userId,
+          email,
+          "registration"
+        );
+
+      } catch (emailError) {
+
+        console.error(
+          "REGISTRATION OTP EMAIL ERROR:",
+          emailError
+        );
+
+        return res.status(503).json({
+          success: false,
+          message:
+            "Account created as pending verification, but the verification email could not be sent. Please try again."
+        });
+      }
+
+
+      /* ---------------------------------------------
+         REGISTRATION RESPONSE
+      --------------------------------------------- */
+
+      return res.status(201).json({
+        success: true,
+        message:
+          "Verification code sent to your email.",
+        requiresEmailVerification: true,
+        challengeToken,
         email,
-        "registration"
-      );
+        countryCode,
+        mobile
+      });
 
 
-    /* ---------------------------------------------
-       SEND REGISTRATION OTP
-    --------------------------------------------- */
+    } catch (error) {
 
-    try {
+      if (client) {
 
-      await sendOtp(
-        userId,
-        email,
-        "registration"
-      );
+        try {
+          await client.query(
+            "ROLLBACK"
+          );
+        } catch (rollbackError) {
 
-    } catch (emailError) {
+          console.error(
+            "REGISTER ROLLBACK ERROR:",
+            rollbackError
+          );
+        }
+
+        client.release();
+      }
+
 
       console.error(
-        "REGISTRATION OTP EMAIL ERROR:",
-        emailError
+        "REGISTER ERROR:",
+        error
       );
 
-      return res.status(503).json({
+
+      if (error.code === "23505") {
+
+        if (
+          String(
+            error.constraint || ""
+          ).includes("mobile")
+        ) {
+          return res.status(409).json({
+            success: false,
+            message:
+              "This mobile number is already registered"
+          });
+        }
+
+        return res.status(409).json({
+          success: false,
+          message:
+            "Username, email or mobile number already exists"
+        });
+      }
+
+
+      return res.status(500).json({
         success: false,
-        message: "Account created as pending verification, but the verification email could not be sent. Please try again."
+        message:
+          "Registration failed"
       });
     }
-
-
-    /* ---------------------------------------------
-       REGISTRATION RESPONSE
-    --------------------------------------------- */
-
-    return res.status(201).json({
-      success: true,
-      message: "Verification code sent to your email.",
-      requiresEmailVerification: true,
-      challengeToken,
-      email
-    });
-
-
-  } catch (error) {
-
-    console.error(
-      "REGISTER ERROR:",
-      error
-    );
-
-    return res.status(500).json({
-      success: false,
-      message: "Registration failed"
-    });
   }
-});
+);
 
 
 /* =========================================================
@@ -459,6 +750,8 @@ router.post(
   "/register/verify",
   async (req, res) => {
 
+    let client;
+
     try {
 
       const {
@@ -467,18 +760,27 @@ router.post(
       } = req.body;
 
 
-      if (!challengeToken || !otp) {
+      if (
+        !challengeToken ||
+        !otp
+      ) {
         return res.status(400).json({
           success: false,
-          message: "Verification token and OTP are required"
+          message:
+            "Verification token and OTP are required"
         });
       }
 
 
-      if (!/^\d{6}$/.test(String(otp).trim())) {
+      if (
+        !/^\d{6}$/.test(
+          String(otp).trim()
+        )
+      ) {
         return res.status(400).json({
           success: false,
-          message: "Please enter the 6-digit OTP"
+          message:
+            "Please enter the 6-digit OTP"
         });
       }
 
@@ -493,80 +795,107 @@ router.post(
       if (!decoded) {
         return res.status(400).json({
           success: false,
-          message: "Verification code has expired. Please register again."
+          message:
+            "Verification code has expired. Please register again."
         });
       }
 
 
-      const user = db.prepare(`
-        SELECT
-          id,
-          username,
-          email,
-          email_verified
-        FROM users
-        WHERE id = ?
-        LIMIT 1
-      `).get(
-        decoded.userId
-      );
+      const userResult =
+        await db.query(
+          `
+          SELECT
+            id,
+            username,
+            email,
+            email_verified
+          FROM users
+          WHERE id = $1
+          LIMIT 1
+          `,
+          [
+            decoded.userId
+          ]
+        );
+
+
+      const user =
+        userResult.rows[0];
 
 
       if (!user) {
         return res.status(404).json({
           success: false,
-          message: "Registration account not found"
+          message:
+            "Registration account not found"
         });
       }
 
 
-      if (Number(user.email_verified) === 1) {
+      if (
+        user.email_verified === true
+      ) {
         return res.status(400).json({
           success: false,
-          message: "Email is already verified"
+          message:
+            "Email is already verified"
         });
       }
 
 
-      const otpRecord = db.prepare(`
-        SELECT *
-        FROM email_otps
-        WHERE user_id = ?
-          AND purpose = 'registration'
-          AND verified = 0
-        ORDER BY id DESC
-        LIMIT 1
-      `).get(
-        user.id
-      );
+      const otpResult =
+        await db.query(
+          `
+          SELECT *
+          FROM email_otps
+          WHERE user_id = $1
+            AND purpose = 'registration'
+            AND verified = FALSE
+          ORDER BY id DESC
+          LIMIT 1
+          `,
+          [
+            user.id
+          ]
+        );
+
+
+      const otpRecord =
+        otpResult.rows[0];
 
 
       if (!otpRecord) {
         return res.status(400).json({
           success: false,
-          message: "Verification code not found"
+          message:
+            "Verification code not found"
         });
       }
 
 
       if (
-        new Date(otpRecord.expires_at).getTime() <
+        new Date(
+          otpRecord.expires_at
+        ).getTime() <
         Date.now()
       ) {
         return res.status(400).json({
           success: false,
-          message: "Verification code has expired"
+          message:
+            "Verification code has expired"
         });
       }
 
 
       if (
-        Number(otpRecord.attempts) >=
-        MAX_OTP_ATTEMPTS
+        Number(
+          otpRecord.attempts
+        ) >= MAX_OTP_ATTEMPTS
       ) {
         return res.status(429).json({
           success: false,
-          message: "Too many incorrect attempts. Please register again."
+          message:
+            "Too many incorrect attempts. Please register again."
         });
       }
 
@@ -577,61 +906,103 @@ router.post(
         );
 
 
-      if (otpHash !== otpRecord.otp_hash) {
+      if (
+        otpHash !==
+        otpRecord.otp_hash
+      ) {
 
-        db.prepare(`
+        await db.query(
+          `
           UPDATE email_otps
           SET attempts = attempts + 1
-          WHERE id = ?
-        `).run(
-          otpRecord.id
+          WHERE id = $1
+          `,
+          [
+            otpRecord.id
+          ]
         );
 
         return res.status(400).json({
           success: false,
-          message: "Invalid verification code"
+          message:
+            "Invalid verification code"
         });
       }
 
 
-      db.transaction(() => {
+      client =
+        await db.pool.connect();
 
-        db.prepare(`
-          UPDATE email_otps
-          SET verified = 1
-          WHERE id = ?
-        `).run(
+      await client.query("BEGIN");
+
+
+      await client.query(
+        `
+        UPDATE email_otps
+        SET verified = TRUE
+        WHERE id = $1
+        `,
+        [
           otpRecord.id
-        );
+        ]
+      );
 
 
-        db.prepare(`
-          UPDATE users
-          SET email_verified = 1
-          WHERE id = ?
-        `).run(
+      await client.query(
+        `
+        UPDATE users
+        SET email_verified = TRUE
+        WHERE id = $1
+        `,
+        [
           user.id
-        );
+        ]
+      );
 
-      })();
+
+      await client.query("COMMIT");
+
+      client.release();
+      client = null;
 
 
       return res.json({
         success: true,
-        message: "Email verified successfully. Please login."
+        message:
+          "Email verified successfully. Please login."
       });
 
 
     } catch (error) {
+
+      if (client) {
+
+        try {
+          await client.query(
+            "ROLLBACK"
+          );
+        } catch (rollbackError) {
+
+          console.error(
+            "REGISTER OTP ROLLBACK ERROR:",
+            rollbackError
+          );
+        }
+
+        client.release();
+      }
+
 
       console.error(
         "REGISTRATION OTP VERIFY ERROR:",
         error
       );
 
+
       return res.status(500).json({
         success: false,
-        message: "OTP verification failed"
+        message:
+          "OTP verification failed"
       });
     }
   }
@@ -662,36 +1033,49 @@ router.post(
       if (!normalizedEmail) {
         return res.status(400).json({
           success: false,
-          message: "Email is required"
+          message:
+            "Email is required"
         });
       }
 
 
-      const user = db.prepare(`
-        SELECT
-          id,
-          email,
-          email_verified
-        FROM users
-        WHERE LOWER(email) = LOWER(?)
-        LIMIT 1
-      `).get(
-        normalizedEmail
-      );
+      const userResult =
+        await db.query(
+          `
+          SELECT
+            id,
+            email,
+            email_verified
+          FROM users
+          WHERE LOWER(email) = LOWER($1)
+          LIMIT 1
+          `,
+          [
+            normalizedEmail
+          ]
+        );
+
+
+      const user =
+        userResult.rows[0];
 
 
       if (!user) {
         return res.status(404).json({
           success: false,
-          message: "Registration not found"
+          message:
+            "Registration not found"
         });
       }
 
 
-      if (Number(user.email_verified) === 1) {
+      if (
+        user.email_verified === true
+      ) {
         return res.status(400).json({
           success: false,
-          message: "Email is already verified"
+          message:
+            "Email is already verified"
         });
       }
 
@@ -713,7 +1097,8 @@ router.post(
 
       return res.json({
         success: true,
-        message: "Verification code sent again.",
+        message:
+          "Verification code sent again.",
         challengeToken,
         email: user.email
       });
@@ -726,9 +1111,11 @@ router.post(
         error
       );
 
+
       return res.status(503).json({
         success: false,
-        message: "Unable to send verification email"
+        message:
+          "Unable to send verification email"
       });
     }
   }
@@ -737,150 +1124,248 @@ router.post(
 
 /* =========================================================
    LOGIN
+   EMAIL OR MOBILE
 ========================================================= */
 
-router.post("/login", async (req, res) => {
-
-  try {
-
-    let {
-      email,
-      password
-    } = req.body;
-
-
-    email = String(email || "").trim().toLowerCase();
-    password = String(password || "");
-
-
-    /* ---------------------------------------------
-       VALIDATION
-    --------------------------------------------- */
-
-    if (!email || !password) {
-
-      return res.status(400).json({
-        success: false,
-        message: "Email and password are required"
-      });
-    }
-
-
-    /* ---------------------------------------------
-       FIND USER BY EMAIL
-    --------------------------------------------- */
-
-    const user = db.prepare(`
-      SELECT *
-      FROM users
-      WHERE LOWER(email) = LOWER(?)
-      LIMIT 1
-    `).get(
-      email
-    );
-
-
-    if (!user) {
-
-      return res.status(401).json({
-        success: false,
-        message: "Invalid email or password"
-      });
-    }
-
-
-    /* ---------------------------------------------
-       EMAIL VERIFICATION
-    --------------------------------------------- */
-
-    if (Number(user.email_verified) !== 1) {
-
-      return res.status(403).json({
-        success: false,
-        message: "Please verify your email before logging in."
-      });
-    }
-
-
-    /* ---------------------------------------------
-       PASSWORD
-    --------------------------------------------- */
-
-    const passwordMatch =
-      await bcrypt.compare(
-        password,
-        user.password_hash
-      );
-
-
-    if (!passwordMatch) {
-
-      return res.status(401).json({
-        success: false,
-        message: "Invalid email or password"
-      });
-    }
-
-
-    /* ---------------------------------------------
-       CREATE LOGIN OTP
-    --------------------------------------------- */
-
-    const challengeToken =
-      createChallengeToken(
-        user.id,
-        user.email,
-        "login"
-      );
-
+router.post(
+  "/login",
+  async (req, res) => {
 
     try {
 
-      await sendOtp(
-        user.id,
-        user.email,
-        "login"
-      );
+      let {
+        email,
+        mobile,
+        countryCode,
+        password
+      } = req.body;
 
-    } catch (emailError) {
+
+      email =
+        String(email || "")
+          .trim()
+          .toLowerCase();
+
+      countryCode =
+        normalizeCountryCode(
+          countryCode
+        );
+
+      mobile =
+        normalizeMobile(
+          mobile,
+          countryCode
+        );
+
+      password =
+        String(password || "");
+
+
+      /* ---------------------------------------------
+         VALIDATION
+      --------------------------------------------- */
+
+      if (!password) {
+        return res.status(400).json({
+          success: false,
+          message:
+            "Password is required"
+        });
+      }
+
+
+      if (!email && !mobile) {
+        return res.status(400).json({
+          success: false,
+          message:
+            "Email or mobile number is required"
+        });
+      }
+
+
+      if (email && mobile) {
+        return res.status(400).json({
+          success: false,
+          message:
+            "Please use either email or mobile number"
+        });
+      }
+
+
+      if (mobile) {
+
+        if (
+          !isValidMobile(mobile)
+        ) {
+          return res.status(400).json({
+            success: false,
+            message:
+              "Please enter a valid international mobile number"
+          });
+        }
+      }
+
+
+      /* ---------------------------------------------
+         FIND USER
+      --------------------------------------------- */
+
+      let userResult;
+
+
+      if (mobile) {
+
+        userResult =
+          await db.query(
+            `
+            SELECT *
+            FROM users
+            WHERE mobile = $1
+            LIMIT 1
+            `,
+            [
+              mobile
+            ]
+          );
+
+      } else {
+
+        userResult =
+          await db.query(
+            `
+            SELECT *
+            FROM users
+            WHERE LOWER(email) = LOWER($1)
+            LIMIT 1
+            `,
+            [
+              email
+            ]
+          );
+      }
+
+
+      const user =
+        userResult.rows[0];
+
+
+      if (!user) {
+
+        return res.status(401).json({
+          success: false,
+          message:
+            "Invalid email/mobile or password"
+        });
+      }
+
+
+      /* ---------------------------------------------
+         EMAIL VERIFICATION
+      --------------------------------------------- */
+
+      if (
+        user.email_verified !== true
+      ) {
+
+        return res.status(403).json({
+          success: false,
+          message:
+            "Please verify your email before logging in."
+        });
+      }
+
+
+      /* ---------------------------------------------
+         PASSWORD
+      --------------------------------------------- */
+
+      const passwordMatch =
+        await bcrypt.compare(
+          password,
+          user.password_hash
+        );
+
+
+      if (!passwordMatch) {
+
+        return res.status(401).json({
+          success: false,
+          message:
+            "Invalid email/mobile or password"
+        });
+      }
+
+
+      /* ---------------------------------------------
+         CREATE LOGIN OTP
+      --------------------------------------------- */
+
+      const challengeToken =
+        createChallengeToken(
+          user.id,
+          user.email,
+          "login"
+        );
+
+
+      try {
+
+        /*
+          2FA / OTP is still sent
+          to the user's registered email.
+        */
+
+        await sendOtp(
+          user.id,
+          user.email,
+          "login"
+        );
+
+      } catch (emailError) {
+
+        console.error(
+          "LOGIN OTP EMAIL ERROR:",
+          emailError
+        );
+
+
+        return res.status(503).json({
+          success: false,
+          message:
+            "Unable to send login verification code. Please try again."
+        });
+      }
+
+
+      /* ---------------------------------------------
+         OTP REQUIRED
+      --------------------------------------------- */
+
+      return res.json({
+        success: true,
+        message:
+          "Verification code sent to your email.",
+        requiresTwoFactor: true,
+        challengeToken
+      });
+
+
+    } catch (error) {
 
       console.error(
-        "LOGIN OTP EMAIL ERROR:",
-        emailError
+        "LOGIN ERROR:",
+        error
       );
 
-      return res.status(503).json({
+
+      return res.status(500).json({
         success: false,
-        message: "Unable to send login verification code. Please try again."
+        message:
+          "Login failed"
       });
     }
-
-
-    /* ---------------------------------------------
-       OTP REQUIRED
-    --------------------------------------------- */
-
-    return res.json({
-      success: true,
-      message: "Verification code sent to your email.",
-      requiresTwoFactor: true,
-      challengeToken
-    });
-
-
-  } catch (error) {
-
-    console.error(
-      "LOGIN ERROR:",
-      error
-    );
-
-    return res.status(500).json({
-      success: false,
-      message: "Login failed"
-    });
   }
-});
+);
 
 
 /* =========================================================
@@ -899,18 +1384,27 @@ router.post(
       } = req.body;
 
 
-      if (!challengeToken || !otp) {
+      if (
+        !challengeToken ||
+        !otp
+      ) {
         return res.status(400).json({
           success: false,
-          message: "Verification token and OTP are required"
+          message:
+            "Verification token and OTP are required"
         });
       }
 
 
-      if (!/^\d{6}$/.test(String(otp).trim())) {
+      if (
+        !/^\d{6}$/.test(
+          String(otp).trim()
+        )
+      ) {
         return res.status(400).json({
           success: false,
-          message: "Please enter the 6-digit OTP"
+          message:
+            "Please enter the 6-digit OTP"
         });
       }
 
@@ -925,68 +1419,92 @@ router.post(
       if (!decoded) {
         return res.status(400).json({
           success: false,
-          message: "Login verification code has expired. Please login again."
+          message:
+            "Login verification code has expired. Please login again."
         });
       }
 
 
-      const user = db.prepare(`
-        SELECT *
-        FROM users
-        WHERE id = ?
-        LIMIT 1
-      `).get(
-        decoded.userId
-      );
+      const userResult =
+        await db.query(
+          `
+          SELECT *
+          FROM users
+          WHERE id = $1
+          LIMIT 1
+          `,
+          [
+            decoded.userId
+          ]
+        );
+
+
+      const user =
+        userResult.rows[0];
 
 
       if (!user) {
         return res.status(404).json({
           success: false,
-          message: "User not found"
+          message:
+            "User not found"
         });
       }
 
 
-      const otpRecord = db.prepare(`
-        SELECT *
-        FROM email_otps
-        WHERE user_id = ?
-          AND purpose = 'login'
-          AND verified = 0
-        ORDER BY id DESC
-        LIMIT 1
-      `).get(
-        user.id
-      );
+      const otpResult =
+        await db.query(
+          `
+          SELECT *
+          FROM email_otps
+          WHERE user_id = $1
+            AND purpose = 'login'
+            AND verified = FALSE
+          ORDER BY id DESC
+          LIMIT 1
+          `,
+          [
+            user.id
+          ]
+        );
+
+
+      const otpRecord =
+        otpResult.rows[0];
 
 
       if (!otpRecord) {
         return res.status(400).json({
           success: false,
-          message: "Login verification code not found"
+          message:
+            "Login verification code not found"
         });
       }
 
 
       if (
-        new Date(otpRecord.expires_at).getTime() <
+        new Date(
+          otpRecord.expires_at
+        ).getTime() <
         Date.now()
       ) {
         return res.status(400).json({
           success: false,
-          message: "Login verification code has expired"
+          message:
+            "Login verification code has expired"
         });
       }
 
 
       if (
-        Number(otpRecord.attempts) >=
-        MAX_OTP_ATTEMPTS
+        Number(
+          otpRecord.attempts
+        ) >= MAX_OTP_ATTEMPTS
       ) {
         return res.status(429).json({
           success: false,
-          message: "Too many incorrect attempts. Please login again."
+          message:
+            "Too many incorrect attempts. Please login again."
         });
       }
 
@@ -997,29 +1515,40 @@ router.post(
         );
 
 
-      if (otpHash !== otpRecord.otp_hash) {
+      if (
+        otpHash !==
+        otpRecord.otp_hash
+      ) {
 
-        db.prepare(`
+        await db.query(
+          `
           UPDATE email_otps
           SET attempts = attempts + 1
-          WHERE id = ?
-        `).run(
-          otpRecord.id
+          WHERE id = $1
+          `,
+          [
+            otpRecord.id
+          ]
         );
+
 
         return res.status(400).json({
           success: false,
-          message: "Invalid verification code"
+          message:
+            "Invalid verification code"
         });
       }
 
 
-      db.prepare(`
+      await db.query(
+        `
         UPDATE email_otps
-        SET verified = 1
-        WHERE id = ?
-      `).run(
-        otpRecord.id
+        SET verified = TRUE
+        WHERE id = $1
+        `,
+        [
+          otpRecord.id
+        ]
       );
 
 
@@ -1027,32 +1556,41 @@ router.post(
          CREATE FINAL LOGIN TOKEN
       --------------------------------------------- */
 
-      const token = jwt.sign(
-        {
-          userId: user.id,
-          username: user.username,
-          role: user.role
-        },
-        JWT_SECRET,
-        {
-          expiresIn: "7d"
-        }
-      );
+      const token =
+        jwt.sign(
+          {
+            userId: user.id,
+            username: user.username,
+            role: user.role
+          },
+          JWT_SECRET,
+          {
+            expiresIn: "7d"
+          }
+        );
 
 
       return res.json({
         success: true,
-        message: "Login successful",
+        message:
+          "Login successful",
         token,
         user: {
           id: user.id,
           username: user.username,
           email: user.email,
+          country_code:
+            user.country_code || null,
+          mobile:
+            user.mobile || null,
           role: user.role,
-          referral_code: user.referral_code,
-          kyc_status: user.kyc_status,
+          referral_code:
+            user.referral_code,
+          kyc_status:
+            user.kyc_status,
           email_verified: 1,
-          created_at: user.created_at
+          created_at:
+            user.created_at
         }
       });
 
@@ -1064,9 +1602,11 @@ router.post(
         error
       );
 
+
       return res.status(500).json({
         success: false,
-        message: "OTP verification failed"
+        message:
+          "OTP verification failed"
       });
     }
   }
@@ -1092,36 +1632,49 @@ router.post(
       if (!email) {
         return res.status(400).json({
           success: false,
-          message: "Email is required"
+          message:
+            "Email is required"
         });
       }
 
 
-      const user = db.prepare(`
-        SELECT
-          id,
-          email,
-          email_verified
-        FROM users
-        WHERE LOWER(email) = LOWER(?)
-        LIMIT 1
-      `).get(
-        email
-      );
+      const userResult =
+        await db.query(
+          `
+          SELECT
+            id,
+            email,
+            email_verified
+          FROM users
+          WHERE LOWER(email) = LOWER($1)
+          LIMIT 1
+          `,
+          [
+            email
+          ]
+        );
+
+
+      const user =
+        userResult.rows[0];
 
 
       if (!user) {
         return res.status(404).json({
           success: false,
-          message: "No account found with this email"
+          message:
+            "No account found with this email"
         });
       }
 
 
-      if (Number(user.email_verified) !== 1) {
+      if (
+        user.email_verified !== true
+      ) {
         return res.status(403).json({
           success: false,
-          message: "Please verify your email first."
+          message:
+            "Please verify your email first."
         });
       }
 
@@ -1149,16 +1702,19 @@ router.post(
           emailError
         );
 
+
         return res.status(503).json({
           success: false,
-          message: "Unable to send password reset code"
+          message:
+            "Unable to send password reset code"
         });
       }
 
 
       return res.json({
         success: true,
-        message: "Password reset code sent to your email.",
+        message:
+          "Password reset code sent to your email.",
         challengeToken
       });
 
@@ -1170,9 +1726,11 @@ router.post(
         error
       );
 
+
       return res.status(500).json({
         success: false,
-        message: "Unable to process password reset"
+        message:
+          "Unable to process password reset"
       });
     }
   }
@@ -1186,6 +1744,8 @@ router.post(
 router.post(
   "/forgot-password/verify",
   async (req, res) => {
+
+    let client;
 
     try {
 
@@ -1203,23 +1763,32 @@ router.post(
       ) {
         return res.status(400).json({
           success: false,
-          message: "Verification token, OTP and new password are required"
+          message:
+            "Verification token, OTP and new password are required"
         });
       }
 
 
-      if (!/^\d{6}$/.test(String(otp).trim())) {
+      if (
+        !/^\d{6}$/.test(
+          String(otp).trim()
+        )
+      ) {
         return res.status(400).json({
           success: false,
-          message: "Please enter the 6-digit OTP"
+          message:
+            "Please enter the 6-digit OTP"
         });
       }
 
 
-      if (String(newPassword).length < 8) {
+      if (
+        String(newPassword).length < 8
+      ) {
         return res.status(400).json({
           success: false,
-          message: "New password must be at least 8 characters"
+          message:
+            "New password must be at least 8 characters"
         });
       }
 
@@ -1234,68 +1803,92 @@ router.post(
       if (!decoded) {
         return res.status(400).json({
           success: false,
-          message: "Password reset code has expired. Please request a new code."
+          message:
+            "Password reset code has expired. Please request a new code."
         });
       }
 
 
-      const user = db.prepare(`
-        SELECT *
-        FROM users
-        WHERE id = ?
-        LIMIT 1
-      `).get(
-        decoded.userId
-      );
+      const userResult =
+        await db.query(
+          `
+          SELECT *
+          FROM users
+          WHERE id = $1
+          LIMIT 1
+          `,
+          [
+            decoded.userId
+          ]
+        );
+
+
+      const user =
+        userResult.rows[0];
 
 
       if (!user) {
         return res.status(404).json({
           success: false,
-          message: "User not found"
+          message:
+            "User not found"
         });
       }
 
 
-      const otpRecord = db.prepare(`
-        SELECT *
-        FROM email_otps
-        WHERE user_id = ?
-          AND purpose = 'forgot_password'
-          AND verified = 0
-        ORDER BY id DESC
-        LIMIT 1
-      `).get(
-        user.id
-      );
+      const otpResult =
+        await db.query(
+          `
+          SELECT *
+          FROM email_otps
+          WHERE user_id = $1
+            AND purpose = 'forgot_password'
+            AND verified = FALSE
+          ORDER BY id DESC
+          LIMIT 1
+          `,
+          [
+            user.id
+          ]
+        );
+
+
+      const otpRecord =
+        otpResult.rows[0];
 
 
       if (!otpRecord) {
         return res.status(400).json({
           success: false,
-          message: "Password reset code not found"
+          message:
+            "Password reset code not found"
         });
       }
 
 
       if (
-        new Date(otpRecord.expires_at).getTime() <
+        new Date(
+          otpRecord.expires_at
+        ).getTime() <
         Date.now()
       ) {
         return res.status(400).json({
           success: false,
-          message: "Password reset code has expired"
+          message:
+            "Password reset code has expired"
         });
       }
 
 
       if (
-        Number(otpRecord.attempts) >=
-        MAX_OTP_ATTEMPTS
+        Number(
+          otpRecord.attempts
+        ) >= MAX_OTP_ATTEMPTS
       ) {
         return res.status(429).json({
           success: false,
-          message: "Too many incorrect attempts. Please request a new code."
+          message:
+            "Too many incorrect attempts. Please request a new code."
         });
       }
 
@@ -1306,19 +1899,27 @@ router.post(
         );
 
 
-      if (otpHash !== otpRecord.otp_hash) {
+      if (
+        otpHash !==
+        otpRecord.otp_hash
+      ) {
 
-        db.prepare(`
+        await db.query(
+          `
           UPDATE email_otps
           SET attempts = attempts + 1
-          WHERE id = ?
-        `).run(
-          otpRecord.id
+          WHERE id = $1
+          `,
+          [
+            otpRecord.id
+          ]
         );
+
 
         return res.status(400).json({
           success: false,
-          message: "Invalid verification code"
+          message:
+            "Invalid verification code"
         });
       }
 
@@ -1330,45 +1931,80 @@ router.post(
         );
 
 
-      db.transaction(() => {
+      client =
+        await db.pool.connect();
 
-        db.prepare(`
-          UPDATE email_otps
-          SET verified = 1
-          WHERE id = ?
-        `).run(
+      await client.query("BEGIN");
+
+
+      await client.query(
+        `
+        UPDATE email_otps
+        SET verified = TRUE
+        WHERE id = $1
+        `,
+        [
           otpRecord.id
-        );
+        ]
+      );
 
 
-        db.prepare(`
-          UPDATE users
-          SET password_hash = ?
-          WHERE id = ?
-        `).run(
+      await client.query(
+        `
+        UPDATE users
+        SET password_hash = $1
+        WHERE id = $2
+        `,
+        [
           passwordHash,
           user.id
-        );
+        ]
+      );
 
-      })();
+
+      await client.query("COMMIT");
+
+      client.release();
+      client = null;
 
 
       return res.json({
         success: true,
-        message: "Password reset successfully. Please login."
+        message:
+          "Password reset successfully. Please login."
       });
 
 
     } catch (error) {
+
+      if (client) {
+
+        try {
+          await client.query(
+            "ROLLBACK"
+          );
+        } catch (rollbackError) {
+
+          console.error(
+            "PASSWORD RESET ROLLBACK ERROR:",
+            rollbackError
+          );
+        }
+
+        client.release();
+      }
+
 
       console.error(
         "PASSWORD RESET VERIFY ERROR:",
         error
       );
 
+
       return res.status(500).json({
         success: false,
-        message: "Password reset failed"
+        message:
+          "Password reset failed"
       });
     }
   }

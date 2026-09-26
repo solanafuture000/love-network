@@ -1,14 +1,20 @@
-﻿const express = require("express");
+const express = require("express");
 const bcrypt = require("bcrypt");
 const crypto = require("crypto");
 const { sendOtpEmail } = require("../services/otpService");
-const db = require("../database");
+const db = require("../database-pg");
 const authenticateToken = require("../middleware/auth");
+
 const router = express.Router();
 
-router.get("/profile", authenticateToken, (req, res) => {
-  const user = db
-    .prepare(`
+/* =========================================================
+   PROFILE
+========================================================= */
+
+router.get("/profile", authenticateToken, async (req, res) => {
+  try {
+    const userResult = await db.query(
+      `
       SELECT
         id,
         username,
@@ -22,19 +28,22 @@ router.get("/profile", authenticateToken, (req, res) => {
         last_mining_date,
         created_at
       FROM users
-      WHERE id = ?
-    `)
-    .get(req.user.userId);
+      WHERE id = $1
+      `,
+      [req.user.userId]
+    );
 
-  if (!user) {
-    return res.status(404).json({
-      success: false,
-      message: "User not found"
-    });
-  }
+    const user = userResult.rows[0];
 
-  const wallet = db
-    .prepare(`
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: "User not found"
+      });
+    }
+
+    const walletResult = await db.query(
+      `
       SELECT
         id,
         balance,
@@ -42,67 +51,87 @@ router.get("/profile", authenticateToken, (req, res) => {
         created_at,
         updated_at
       FROM wallets
-      WHERE user_id = ?
-    `)
-    .get(req.user.userId);
+      WHERE user_id = $1
+      `,
+      [req.user.userId]
+    );
 
-  res.json({
-    success: true,
-    user,
-    wallet: wallet || null
-  });
+    res.json({
+      success: true,
+      user,
+      wallet: walletResult.rows[0] || null
+    });
+  } catch (error) {
+    console.error("PROFILE ERROR:", error);
+
+    res.status(500).json({
+      success: false,
+      message: "Unable to load profile"
+    });
+  }
 });
 
-router.put("/profile", authenticateToken, (req, res) => {
-  const { username } = req.body;
 
-  if (!username || typeof username !== "string") {
-    return res.status(400).json({
-      success: false,
-      message: "Username is required"
-    });
-  }
+/* =========================================================
+   UPDATE PROFILE
+========================================================= */
 
-  const trimmedUsername = username.trim();
+router.put("/profile", authenticateToken, async (req, res) => {
+  try {
+    const { username } = req.body;
 
-  if (trimmedUsername.length < 3) {
-    return res.status(400).json({
-      success: false,
-      message: "Username must be at least 3 characters"
-    });
-  }
+    if (!username || typeof username !== "string") {
+      return res.status(400).json({
+        success: false,
+        message: "Username is required"
+      });
+    }
 
-  if (trimmedUsername.length > 30) {
-    return res.status(400).json({
-      success: false,
-      message: "Username must be 30 characters or less"
-    });
-  }
+    const trimmedUsername = username.trim();
 
-  const existingUser = db
-    .prepare(`
+    if (trimmedUsername.length < 3) {
+      return res.status(400).json({
+        success: false,
+        message: "Username must be at least 3 characters"
+      });
+    }
+
+    if (trimmedUsername.length > 30) {
+      return res.status(400).json({
+        success: false,
+        message: "Username must be 30 characters or less"
+      });
+    }
+
+    const existingUserResult = await db.query(
+      `
       SELECT id
       FROM users
-      WHERE username = ?
-      AND id != ?
-    `)
-    .get(trimmedUsername, req.user.userId);
+      WHERE username = $1
+        AND id != $2
+      LIMIT 1
+      `,
+      [trimmedUsername, req.user.userId]
+    );
 
-  if (existingUser) {
-    return res.status(409).json({
-      success: false,
-      message: "Username already exists"
-    });
-  }
+    if (existingUserResult.rows[0]) {
+      return res.status(409).json({
+        success: false,
+        message: "Username already exists"
+      });
+    }
 
-  db.prepare(`
-    UPDATE users
-    SET username = ?
-    WHERE id = ?
-  `).run(trimmedUsername, req.user.userId);
+    await db.query(
+      `
+      UPDATE users
+      SET username = $1
+      WHERE id = $2
+      `,
+      [trimmedUsername, req.user.userId]
+    );
 
-  const updatedUser = db
-    .prepare(`
+    const updatedUserResult = await db.query(
+      `
       SELECT
         id,
         username,
@@ -116,18 +145,38 @@ router.put("/profile", authenticateToken, (req, res) => {
         last_mining_date,
         created_at
       FROM users
-      WHERE id = ?
-    `)
-    .get(req.user.userId);
+      WHERE id = $1
+      `,
+      [req.user.userId]
+    );
 
-  res.json({
-    success: true,
-    message: "Profile updated successfully",
-    user: updatedUser
-  });
+    res.json({
+      success: true,
+      message: "Profile updated successfully",
+      user: updatedUserResult.rows[0]
+    });
+  } catch (error) {
+    console.error("UPDATE PROFILE ERROR:", error);
+
+    if (error.code === "23505") {
+      return res.status(409).json({
+        success: false,
+        message: "Username already exists"
+      });
+    }
+
+    res.status(500).json({
+      success: false,
+      message: "Unable to update profile"
+    });
+  }
 });
 
-// CHANGE PASSWORD
+
+/* =========================================================
+   CHANGE PASSWORD
+========================================================= */
+
 router.put("/change-password", authenticateToken, async (req, res) => {
   try {
     const { currentPassword, newPassword } = req.body;
@@ -153,13 +202,16 @@ router.put("/change-password", authenticateToken, async (req, res) => {
       });
     }
 
-    const user = db
-      .prepare(`
-        SELECT id, password_hash
-        FROM users
-        WHERE id = ?
-      `)
-      .get(req.user.userId);
+    const userResult = await db.query(
+      `
+      SELECT id, password_hash
+      FROM users
+      WHERE id = $1
+      `,
+      [req.user.userId]
+    );
+
+    const user = userResult.rows[0];
 
     if (!user) {
       return res.status(404).json({
@@ -189,11 +241,14 @@ router.put("/change-password", authenticateToken, async (req, res) => {
 
     const newPasswordHash = await bcrypt.hash(newPassword, 12);
 
-    db.prepare(`
+    await db.query(
+      `
       UPDATE users
-      SET password_hash = ?
-      WHERE id = ?
-    `).run(newPasswordHash, req.user.userId);
+      SET password_hash = $1
+      WHERE id = $2
+      `,
+      [newPasswordHash, req.user.userId]
+    );
 
     res.json({
       success: true,
@@ -209,7 +264,10 @@ router.put("/change-password", authenticateToken, async (req, res) => {
   }
 });
 
-// CHANGE EMAIL
+
+/* =========================================================
+   CHANGE EMAIL - REQUEST OTP
+========================================================= */
 
 router.put("/change-email/request", authenticateToken, async (req, res) => {
   try {
@@ -223,6 +281,7 @@ router.put("/change-email/request", authenticateToken, async (req, res) => {
     }
 
     const email = newEmail.trim().toLowerCase();
+
     const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
     if (!emailRegex.test(email)) {
@@ -232,11 +291,16 @@ router.put("/change-email/request", authenticateToken, async (req, res) => {
       });
     }
 
-    const user = db.prepare(`
+    const userResult = await db.query(
+      `
       SELECT id, email, password_hash
       FROM users
-      WHERE id = ?
-    `).get(req.user.userId);
+      WHERE id = $1
+      `,
+      [req.user.userId]
+    );
+
+    const user = userResult.rows[0];
 
     if (!user) {
       return res.status(404).json({
@@ -264,44 +328,68 @@ router.put("/change-email/request", authenticateToken, async (req, res) => {
       });
     }
 
-    const existingEmail = db.prepare(`
-      SELECT id FROM users
-      WHERE LOWER(email) = ? AND id != ?
-    `).get(email, user.id);
+    const existingEmailResult = await db.query(
+      `
+      SELECT id
+      FROM users
+      WHERE LOWER(email) = $1
+        AND id != $2
+      LIMIT 1
+      `,
+      [email, user.id]
+    );
 
-    if (existingEmail) {
+    if (existingEmailResult.rows[0]) {
       return res.status(409).json({
         success: false,
         message: "Email address is already in use"
       });
     }
 
-    const otp = String(Math.floor(100000 + Math.random() * 900000));
+    const otp = String(
+      Math.floor(100000 + Math.random() * 900000)
+    );
 
     const otpHash = crypto
       .createHash("sha256")
       .update(otp)
       .digest("hex");
 
-    const expiresAt = new Date(Date.now() + 10 * 60 * 1000).toISOString();
+    const expiresAt = new Date(
+      Date.now() + 10 * 60 * 1000
+    ).toISOString();
 
-    db.prepare(`
+    await db.query(
+      `
       UPDATE email_otps
-      SET verified = 1
-      WHERE user_id = ?
-      AND purpose = 'email_change'
-      AND verified = 0
-    `).run(user.id);
+      SET verified = TRUE
+      WHERE user_id = $1
+        AND purpose = 'email_change'
+        AND verified = FALSE
+      `,
+      [user.id]
+    );
 
-    db.prepare(`
+    await db.query(
+      `
       INSERT INTO email_otps
-      (user_id, email, otp_hash, expires_at, attempts, verified, purpose)
-      VALUES (?, ?, ?, ?, 0, 0, 'email_change')
-    `).run(
-      user.id,
-      email,
-      otpHash,
-      expiresAt
+      (
+        user_id,
+        email,
+        otp_hash,
+        expires_at,
+        attempts,
+        verified,
+        purpose
+      )
+      VALUES ($1, $2, $3, $4, 0, FALSE, 'email_change')
+      `,
+      [
+        user.id,
+        email,
+        otpHash,
+        expiresAt
+      ]
     );
 
     await sendOtpEmail(email, otp);
@@ -321,6 +409,11 @@ router.put("/change-email/request", authenticateToken, async (req, res) => {
   }
 });
 
+
+/* =========================================================
+   CHANGE EMAIL - VERIFY OTP
+========================================================= */
+
 router.put("/change-email/verify", authenticateToken, async (req, res) => {
   try {
     const { newEmail, otp } = req.body;
@@ -334,15 +427,25 @@ router.put("/change-email/verify", authenticateToken, async (req, res) => {
 
     const email = newEmail.trim().toLowerCase();
 
-    const record = db.prepare(`
-      SELECT id, email, otp_hash, expires_at, attempts
+    const recordResult = await db.query(
+      `
+      SELECT
+        id,
+        email,
+        otp_hash,
+        expires_at,
+        attempts
       FROM email_otps
-      WHERE user_id = ?
-      AND purpose = 'email_change'
-      AND verified = 0
+      WHERE user_id = $1
+        AND purpose = 'email_change'
+        AND verified = FALSE
       ORDER BY id DESC
       LIMIT 1
-    `).get(req.user.userId);
+      `,
+      [req.user.userId]
+    );
+
+    const record = recordResult.rows[0];
 
     if (!record) {
       return res.status(400).json({
@@ -351,7 +454,7 @@ router.put("/change-email/verify", authenticateToken, async (req, res) => {
       });
     }
 
-    if (record.email.toLowerCase() !== email) {
+    if (String(record.email).toLowerCase() !== email) {
       return res.status(400).json({
         success: false,
         message: "Email does not match the verification request"
@@ -365,7 +468,7 @@ router.put("/change-email/verify", authenticateToken, async (req, res) => {
       });
     }
 
-    if (record.attempts >= 5) {
+    if (Number(record.attempts) >= 5) {
       return res.status(429).json({
         success: false,
         message: "Too many incorrect attempts"
@@ -378,11 +481,14 @@ router.put("/change-email/verify", authenticateToken, async (req, res) => {
       .digest("hex");
 
     if (otpHash !== record.otp_hash) {
-      db.prepare(`
+      await db.query(
+        `
         UPDATE email_otps
         SET attempts = attempts + 1
-        WHERE id = ?
-      `).run(record.id);
+        WHERE id = $1
+        `,
+        [record.id]
+      );
 
       return res.status(401).json({
         success: false,
@@ -390,29 +496,54 @@ router.put("/change-email/verify", authenticateToken, async (req, res) => {
       });
     }
 
-    const existingEmail = db.prepare(`
-      SELECT id FROM users
-      WHERE LOWER(email) = ? AND id != ?
-    `).get(email, req.user.userId);
+    const existingEmailResult = await db.query(
+      `
+      SELECT id
+      FROM users
+      WHERE LOWER(email) = $1
+        AND id != $2
+      LIMIT 1
+      `,
+      [email, req.user.userId]
+    );
 
-    if (existingEmail) {
+    if (existingEmailResult.rows[0]) {
       return res.status(409).json({
         success: false,
         message: "Email address is already in use"
       });
     }
 
-    db.prepare(`
-      UPDATE users
-      SET email = ?
-      WHERE id = ?
-    `).run(email, req.user.userId);
+    const client = await db.pool.connect();
 
-    db.prepare(`
-      UPDATE email_otps
-      SET verified = 1
-      WHERE id = ?
-    `).run(record.id);
+    try {
+      await client.query("BEGIN");
+
+      await client.query(
+        `
+        UPDATE users
+        SET email = $1
+        WHERE id = $2
+        `,
+        [email, req.user.userId]
+      );
+
+      await client.query(
+        `
+        UPDATE email_otps
+        SET verified = TRUE
+        WHERE id = $1
+        `,
+        [record.id]
+      );
+
+      await client.query("COMMIT");
+    } catch (transactionError) {
+      await client.query("ROLLBACK");
+      throw transactionError;
+    } finally {
+      client.release();
+    }
 
     res.json({
       success: true,
@@ -422,12 +553,24 @@ router.put("/change-email/verify", authenticateToken, async (req, res) => {
   } catch (error) {
     console.error("EMAIL CHANGE VERIFY ERROR:", error);
 
+    if (error.code === "23505") {
+      return res.status(409).json({
+        success: false,
+        message: "Email address is already in use"
+      });
+    }
+
     res.status(500).json({
       success: false,
       message: "Unable to change email"
     });
   }
 });
+
+
+/* =========================================================
+   CHANGE EMAIL - DIRECT
+========================================================= */
 
 router.put("/change-email", authenticateToken, async (req, res) => {
   try {
@@ -458,13 +601,16 @@ router.put("/change-email", authenticateToken, async (req, res) => {
       });
     }
 
-    const user = db
-      .prepare(`
-        SELECT id, email, password_hash
-        FROM users
-        WHERE id = ?
-      `)
-      .get(req.user.userId);
+    const userResult = await db.query(
+      `
+      SELECT id, email, password_hash
+      FROM users
+      WHERE id = $1
+      `,
+      [req.user.userId]
+    );
+
+    const user = userResult.rows[0];
 
     if (!user) {
       return res.status(404).json({
@@ -492,27 +638,32 @@ router.put("/change-email", authenticateToken, async (req, res) => {
       });
     }
 
-    const existingEmail = db
-      .prepare(`
-        SELECT id
-        FROM users
-        WHERE LOWER(email) = ?
-        AND id != ?
-      `)
-      .get(email, req.user.userId);
+    const existingEmailResult = await db.query(
+      `
+      SELECT id
+      FROM users
+      WHERE LOWER(email) = $1
+        AND id != $2
+      LIMIT 1
+      `,
+      [email, req.user.userId]
+    );
 
-    if (existingEmail) {
+    if (existingEmailResult.rows[0]) {
       return res.status(409).json({
         success: false,
         message: "Email address is already in use"
       });
     }
 
-    db.prepare(`
+    await db.query(
+      `
       UPDATE users
-      SET email = ?
-      WHERE id = ?
-    `).run(email, req.user.userId);
+      SET email = $1
+      WHERE id = $2
+      `,
+      [email, req.user.userId]
+    );
 
     res.json({
       success: true,
@@ -522,6 +673,13 @@ router.put("/change-email", authenticateToken, async (req, res) => {
   } catch (error) {
     console.error("CHANGE EMAIL ERROR:", error);
 
+    if (error.code === "23505") {
+      return res.status(409).json({
+        success: false,
+        message: "Email address is already in use"
+      });
+    }
+
     res.status(500).json({
       success: false,
       message: "Unable to change email"
@@ -529,21 +687,28 @@ router.put("/change-email", authenticateToken, async (req, res) => {
   }
 });
 
-// REFERRAL DATA
-router.get("/referrals", authenticateToken, (req, res) => {
+
+/* =========================================================
+   REFERRAL DATA
+========================================================= */
+
+router.get("/referrals", authenticateToken, async (req, res) => {
   try {
     const userId = req.user.userId;
 
-    const user = db
-      .prepare(`
-        SELECT
-          id,
-          username,
-          referral_code
-        FROM users
-        WHERE id = ?
-      `)
-      .get(userId);
+    const userResult = await db.query(
+      `
+      SELECT
+        id,
+        username,
+        referral_code
+      FROM users
+      WHERE id = $1
+      `,
+      [userId]
+    );
+
+    const user = userResult.rows[0];
 
     if (!user) {
       return res.status(404).json({
@@ -552,40 +717,45 @@ router.get("/referrals", authenticateToken, (req, res) => {
       });
     }
 
-    const referrals = db
-      .prepare(`
-        SELECT
-          r.id,
-          r.referred_user_id,
-          r.status,
-          r.reward_rate,
-          r.total_reward,
-          r.created_at,
-          u.username,
-          u.email,
-          u.kyc_status
-        FROM referrals r
-        JOIN users u
-          ON u.id = r.referred_user_id
-        WHERE r.referrer_user_id = ?
-        ORDER BY r.id DESC
-      `)
-      .all(userId);
+    const referralsResult = await db.query(
+      `
+      SELECT
+        r.id,
+        r.referred_user_id,
+        r.status,
+        r.reward_rate,
+        r.total_reward,
+        r.created_at,
+        u.username,
+        u.email,
+        u.kyc_status
+      FROM referrals r
+      JOIN users u
+        ON u.id = r.referred_user_id
+      WHERE r.referrer_user_id = $1
+      ORDER BY r.id DESC
+      `,
+      [userId]
+    );
 
-    const rewards = db
-      .prepare(`
-        SELECT
-          id,
-          referred_user_id,
-          amount,
-          status,
-          reward_date,
-          created_at
-        FROM referral_rewards
-        WHERE referrer_user_id = ?
-        ORDER BY id DESC
-      `)
-      .all(userId);
+    const rewardsResult = await db.query(
+      `
+      SELECT
+        id,
+        referred_user_id,
+        amount,
+        status,
+        reward_date,
+        created_at
+      FROM referral_rewards
+      WHERE referrer_user_id = $1
+      ORDER BY id DESC
+      `,
+      [userId]
+    );
+
+    const referrals = referralsResult.rows;
+    const rewards = rewardsResult.rows;
 
     const totalRewards = rewards.reduce(
       (sum, reward) => sum + Number(reward.amount || 0),
@@ -614,7 +784,10 @@ router.get("/referrals", authenticateToken, (req, res) => {
 });
 
 
-// DELETE ACCOUNT
+/* =========================================================
+   DELETE ACCOUNT
+========================================================= */
+
 router.delete("/account", authenticateToken, async (req, res) => {
   try {
     const { currentPassword } = req.body;
@@ -626,11 +799,16 @@ router.delete("/account", authenticateToken, async (req, res) => {
       });
     }
 
-    const user = db.prepare(`
+    const userResult = await db.query(
+      `
       SELECT id, password_hash
       FROM users
-      WHERE id = ?
-    `).get(req.user.userId);
+      WHERE id = $1
+      `,
+      [req.user.userId]
+    );
+
+    const user = userResult.rows[0];
 
     if (!user) {
       return res.status(404).json({
@@ -651,47 +829,72 @@ router.delete("/account", authenticateToken, async (req, res) => {
       });
     }
 
-    const deleteAccount = db.transaction(() => {
+    const client = await db.pool.connect();
+
+    try {
+      await client.query("BEGIN");
+
       const userId = user.id;
 
-      db.prepare(
-        "DELETE FROM email_otps WHERE user_id = ?"
-      ).run(userId);
+      await client.query(
+        "DELETE FROM email_otps WHERE user_id = $1",
+        [userId]
+      );
 
-      db.prepare(
-        "DELETE FROM user_kyc WHERE user_id = ?"
-      ).run(userId);
+      await client.query(
+        "DELETE FROM user_kyc WHERE user_id = $1",
+        [userId]
+      );
 
-      db.prepare(
-        "DELETE FROM wallet_transactions WHERE user_id = ?"
-      ).run(userId);
+      await client.query(
+        "DELETE FROM wallet_transactions WHERE user_id = $1",
+        [userId]
+      );
 
-      db.prepare(
-        "DELETE FROM referral_rewards WHERE referrer_user_id = ? OR referred_user_id = ?"
-      ).run(userId, userId);
+      await client.query(
+        `
+        DELETE FROM referral_rewards
+        WHERE referrer_user_id = $1
+           OR referred_user_id = $1
+        `,
+        [userId]
+      );
 
-      db.prepare(
-        "DELETE FROM referrals WHERE referrer_user_id = ? OR referred_user_id = ?"
-      ).run(userId, userId);
+      await client.query(
+        `
+        DELETE FROM referrals
+        WHERE referrer_user_id = $1
+           OR referred_user_id = $1
+        `,
+        [userId]
+      );
 
-      db.prepare(
-        "DELETE FROM mining_sessions WHERE user_id = ?"
-      ).run(userId);
+      await client.query(
+        "DELETE FROM mining_sessions WHERE user_id = $1",
+        [userId]
+      );
 
-      db.prepare(
-        "DELETE FROM wallets WHERE user_id = ?"
-      ).run(userId);
+      await client.query(
+        "DELETE FROM wallets WHERE user_id = $1",
+        [userId]
+      );
 
-      const result = db.prepare(
-        "DELETE FROM users WHERE id = ?"
-      ).run(userId);
+      const deleteResult = await client.query(
+        "DELETE FROM users WHERE id = $1",
+        [userId]
+      );
 
-      if (result.changes !== 1) {
+      if (deleteResult.rowCount !== 1) {
         throw new Error("Account deletion failed");
       }
-    });
 
-    deleteAccount();
+      await client.query("COMMIT");
+    } catch (transactionError) {
+      await client.query("ROLLBACK");
+      throw transactionError;
+    } finally {
+      client.release();
+    }
 
     res.json({
       success: true,
@@ -707,6 +910,9 @@ router.delete("/account", authenticateToken, async (req, res) => {
   }
 });
 
+
+/* =========================================================
+   EXPORT
+========================================================= */
+
 module.exports = router;
-
-
