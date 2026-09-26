@@ -9,6 +9,10 @@ async function run() {
     `);
 
     await db.query(`
+      DROP INDEX IF EXISTS users_mobile_unique_idx
+    `);
+
+    await db.query(`
       CREATE UNIQUE INDEX IF NOT EXISTS users_mobile_unique_idx
       ON users (mobile)
       WHERE mobile IS NOT NULL AND mobile <> ''
@@ -17,12 +21,8 @@ async function run() {
     console.log("MOBILE COUNTRY CODE MIGRATION OK");
   } catch (error) {
     console.error("MIGRATION ERROR:", error.message);
-    process.exitCode = 1;
-  } finally {
-    if (db.pool) {
-      await db.pool.end();
-    }
+    throw error;
   }
 }
 
-run();
+module.exports = { run };

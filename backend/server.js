@@ -14,12 +14,6 @@ const kycRoutes = require("./routes/kyc");
 const adminRoutes = require("./routes/admin");
 const otpRoutes = require("./routes/otp");
 
-// Run PostgreSQL mobile/country-code migration automatically on Render.
-// Local development is not affected when SUPABASE_DATABASE_URL is unavailable.
-if (process.env.SUPABASE_DATABASE_URL) {
-  require("./addMobileFields");
-}
-
 const app = express();
 const PORT = process.env.PORT || 5000;
 
@@ -64,6 +58,20 @@ app.get("/api/health", (req, res) => {
   });
 });
 
-app.listen(PORT, "0.0.0.0", () => {
-  console.log(`LOVE Network Backend running on http://localhost:${PORT}`);
-});
+async function startServer() {
+  try {
+    if (process.env.SUPABASE_DATABASE_URL) {
+      const mobileMigration = require("./addMobileFields");
+      await mobileMigration.run();
+    }
+
+    app.listen(PORT, "0.0.0.0", () => {
+      console.log(`LOVE Network Backend running on http://localhost:${PORT}`);
+    });
+  } catch (error) {
+    console.error("LOVE Network startup migration failed:", error.message);
+    process.exit(1);
+  }
+}
+
+startServer();
