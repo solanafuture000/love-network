@@ -1,6 +1,7 @@
-const express = require("express");
-const db = require("../database");
+﻿const express = require("express");
+const db = require("../database-pg");
 const authenticateToken = require("../middleware/auth");
+
 const {
   KYC_MINING_SESSIONS,
   updateKycEligibility
@@ -9,45 +10,48 @@ const {
 const router = express.Router();
 
 // KYC STATUS
-router.get("/status", authenticateToken, (req, res) => {
+router.get("/status", authenticateToken, async (req, res) => {
   try {
     const userId = req.user.userId;
 
-    const status = updateKycEligibility(userId);
+    const status = await updateKycEligibility(userId);
 
-    const mining = db
-      .prepare(`
-        SELECT COUNT(*) AS completed_sessions
-        FROM mining_sessions
-        WHERE user_id = ?
-          AND status = 'completed'
-      `)
-      .get(userId);
+    const miningResult = await db.query(
+      `SELECT COUNT(*)::int AS completed_sessions
+       FROM mining_sessions
+       WHERE user_id = $1
+         AND status = 'completed'`,
+      [userId]
+    );
 
-    const kyc = db
-      .prepare(`
-        SELECT
-          status,
-          eligible_at,
-          submitted_at,
-          approved_at,
-          rejection_reason
-        FROM user_kyc
-        WHERE user_id = ?
-      `)
-      .get(userId);
+    const completedSessions = Number(
+      miningResult.rows[0]?.completed_sessions || 0
+    );
+
+    const kycResult = await db.query(
+      `SELECT status, eligible_at, submitted_at, approved_at, rejection_reason
+       FROM user_kyc
+       WHERE user_id = $1
+       LIMIT 1`,
+      [userId]
+    );
+
+    const kyc = kycResult.rows[0] || null;
 
     res.json({
       success: true,
       kyc: {
         status,
-        completed_sessions: mining.completed_sessions,
+        completed_sessions: completedSessions,
         required_sessions: KYC_MINING_SESSIONS,
         remaining_sessions: Math.max(
           0,
-          KYC_MINING_SESSIONS - mining.completed_sessions
+          KYC_MINING_SESSIONS - completedSessions
         ),
-        eligible: status === "ELIGIBLE" || status === "PENDING" || status === "APPROVED",
+        eligible:
+          status === "ELIGIBLE" ||
+          status === "PENDING" ||
+          status === "APPROVED",
         submitted_at: kyc?.submitted_at || null,
         approved_at: kyc?.approved_at || null,
         rejection_reason: kyc?.rejection_reason || null
@@ -63,27 +67,23 @@ router.get("/status", authenticateToken, (req, res) => {
   }
 });
 
+
 // SUBMIT KYC
-router.post("/submit", authenticateToken, (req, res) => {
+router.post("/submit", authenticateToken, async (req, res) => {
   try {
     const userId = req.user.userId;
 
-    // Always refresh eligibility through the central KYC service.
-    const status = updateKycEligibility(userId);
+    const status = await updateKycEligibility(userId);
 
-    const kyc = db
-      .prepare(`
-        SELECT
-          id,
-          status,
-          eligible_at,
-          submitted_at,
-          approved_at,
-          rejection_reason
-        FROM user_kyc
-        WHERE user_id = ?
-      `)
-      .get(userId);
+    const kycResult = await db.query(
+      `SELECT id, status, eligible_at, submitted_at, approved_at, rejection_reason
+       FROM user_kyc
+       WHERE user_id = $1
+       LIMIT 1`,
+      [userId]
+    );
+
+    const kyc = kycResult.rows[0] || null;
 
     if (!kyc) {
       return res.status(404).json({
@@ -93,23 +93,26 @@ router.post("/submit", authenticateToken, (req, res) => {
     }
 
     if (status === "NOT_ELIGIBLE") {
-      const completed = db
-        .prepare(`
-          SELECT COUNT(*) AS completed_sessions
-          FROM mining_sessions
-          WHERE user_id = ?
-            AND status = 'completed'
-        `)
-        .get(userId);
+      const miningResult = await db.query(
+        `SELECT COUNT(*)::int AS completed_sessions
+         FROM mining_sessions
+         WHERE user_id = $1
+           AND status = 'completed'`,
+        [userId]
+      );
+
+      const completedSessions = Number(
+        miningResult.rows[0]?.completed_sessions || 0
+      );
 
       return res.status(403).json({
         success: false,
         message: "KYC is not eligible yet",
-        completed_sessions: completed.completed_sessions,
+        completed_sessions: completedSessions,
         required_sessions: KYC_MINING_SESSIONS,
         remaining_sessions: Math.max(
           0,
-          KYC_MINING_SESSIONS - completed.completed_sessions
+          KYC_MINING_SESSIONS - completedSessions
         )
       });
     }
@@ -136,30 +139,27 @@ router.post("/submit", authenticateToken, (req, res) => {
       });
     }
 
-    db.prepare(`
-      UPDATE user_kyc
-      SET status = 'PENDING',
-          submitted_at = CURRENT_TIMESTAMP,
-          approved_at = NULL,
-          rejection_reason = NULL,
-          updated_at = CURRENT_TIMESTAMP
-      WHERE user_id = ?
-    `).run(userId);
+    await db.query(
+      `UPDATE user_kyc
+       SET status = 'PENDING',
+           submitted_at = CURRENT_TIMESTAMP,
+           approved_at = NULL,
+           rejection_reason = NULL,
+           updated_at = CURRENT_TIMESTAMP
+       WHERE user_id = $1`,
+      [userId]
+    );
 
-    const updatedKyc = db
-      .prepare(`
-        SELECT
-          id,
-          user_id,
-          status,
-          eligible_at,
-          submitted_at,
-          approved_at,
-          rejection_reason
-        FROM user_kyc
-        WHERE user_id = ?
-      `)
-      .get(userId);
+    const updatedKycResult = await db.query(
+      `SELECT id, user_id, status, eligible_at, submitted_at,
+              approved_at, rejection_reason
+       FROM user_kyc
+       WHERE user_id = $1
+       LIMIT 1`,
+      [userId]
+    );
+
+    const updatedKyc = updatedKycResult.rows[0] || null;
 
     res.json({
       success: true,
@@ -175,5 +175,6 @@ router.post("/submit", authenticateToken, (req, res) => {
     });
   }
 });
+
 
 module.exports = router;
