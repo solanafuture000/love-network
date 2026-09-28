@@ -14,6 +14,16 @@ export default function Auth() {
   const [mobileCountry, setMobileCountry] = useState("PK");
   const [password, setPassword] = useState("");
   const [referralCode, setReferralCode] = useState("");
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const ref = params.get("ref");
+
+    if (ref && ref.trim()) {
+      setReferralCode(ref.trim().toUpperCase());
+      setMode("register");
+    }
+  }, []);
+
 
   const [showPassword, setShowPassword] = useState(false);
   const [showResetPassword, setShowResetPassword] = useState(false);
@@ -2007,13 +2017,6 @@ export default function Auth() {
   );
 }
 
-  useEffect(() => {
-    const params = new URLSearchParams(window.location.search);
-    const ref = params.get("ref");
 
-    if (ref && ref.trim()) {
-      setReferralCode(ref.trim().toUpperCase());
-      setMode("register");
-    }
-  }, []);
+
 
