@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
 import PhoneInput, { getCountryCallingCode } from "react-phone-number-input";
 import "react-phone-number-input/style.css";
 
@@ -63,6 +63,69 @@ export default function Auth() {
 
     const data = await response.json().catch(() => ({}));
 
+    /*
+      EXISTING UNVERIFIED ACCOUNT
+
+      The backend returns 403 when the account exists but
+      email_verified is false.
+
+      For email login we can safely use the existing
+      registration resend endpoint to send a fresh OTP.
+    */
+    if (
+      !response.ok &&
+      response.status === 403 &&
+      loginMethod === "email" &&
+      String(data.message || "")
+        .toLowerCase()
+        .includes("verify your email")
+    ) {
+      try {
+        const resendResponse = await fetch(
+          `${API_URL}/api/auth/register/resend`,
+          {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({
+              email: email.trim().toLowerCase(),
+            }),
+          }
+        );
+
+        const resendData = await resendResponse
+          .json()
+          .catch(() => ({}));
+
+        if (!resendResponse.ok) {
+          throw new Error(
+            resendData.message ||
+              "Unable to send email verification code."
+          );
+        }
+
+        if (resendData.challengeToken) {
+          setChallengeToken(resendData.challengeToken);
+          setOtp("");
+          setRegistrationOtpStep(true);
+          setMessage(
+            "Your email is not verified. A new 6-digit verification code has been sent to your email."
+          );
+          return;
+        }
+
+        throw new Error(
+          "Verification code could not be created."
+        );
+      } catch (verificationError) {
+        throw new Error(
+          verificationError.message ||
+            "Unable to send verification code."
+        );
+      }
+    }
+
     if (!response.ok) {
       throw new Error(data.message || "Login failed");
     }
@@ -80,7 +143,10 @@ export default function Auth() {
     }
 
     if (data.user) {
-      localStorage.setItem("love_user", JSON.stringify(data.user));
+      localStorage.setItem(
+        "love_user",
+        JSON.stringify(data.user)
+      );
     }
 
     window.dispatchEvent(new Event("love-auth-change"));
@@ -117,7 +183,9 @@ export default function Auth() {
       const data = await response.json().catch(() => ({}));
 
       if (!response.ok) {
-        throw new Error(data.message || "OTP verification failed");
+        throw new Error(
+          data.message || "OTP verification failed"
+        );
       }
 
       if (data.token) {
@@ -125,7 +193,10 @@ export default function Auth() {
       }
 
       if (data.user) {
-        localStorage.setItem("love_user", JSON.stringify(data.user));
+        localStorage.setItem(
+          "love_user",
+          JSON.stringify(data.user)
+        );
       }
 
       window.dispatchEvent(new Event("love-auth-change"));
@@ -136,7 +207,9 @@ export default function Auth() {
       setOtp("");
     } catch (error) {
       console.error("2FA LOGIN ERROR:", error);
-      setMessage(error.message || "OTP verification failed");
+      setMessage(
+        error.message || "OTP verification failed"
+      );
     } finally {
       setLoading(false);
     }
@@ -170,7 +243,9 @@ export default function Auth() {
       const data = await response.json().catch(() => ({}));
 
       if (!response.ok) {
-        throw new Error(data.message || "Unable to send reset code");
+        throw new Error(
+          data.message || "Unable to send reset code"
+        );
       }
 
       if (data.challengeToken) {
@@ -189,7 +264,9 @@ export default function Auth() {
       }
     } catch (error) {
       console.error("FORGOT PASSWORD ERROR:", error);
-      setMessage(error.message || "Unable to send reset code");
+      setMessage(
+        error.message || "Unable to send reset code"
+      );
     } finally {
       setLoading(false);
     }
@@ -204,7 +281,9 @@ export default function Auth() {
     }
 
     if (resetPassword.length < 8) {
-      setMessage("New password must be at least 8 characters.");
+      setMessage(
+        "New password must be at least 8 characters."
+      );
       return;
     }
 
@@ -235,7 +314,9 @@ export default function Auth() {
       const data = await response.json().catch(() => ({}));
 
       if (!response.ok) {
-        throw new Error(data.message || "Password reset failed");
+        throw new Error(
+          data.message || "Password reset failed"
+        );
       }
 
       setForgotPasswordOtpStep(false);
@@ -248,11 +329,14 @@ export default function Auth() {
       setMode("login");
 
       setMessage(
-        data.message || "Password reset successfully. Please login."
+        data.message ||
+          "Password reset successfully. Please login."
       );
     } catch (error) {
       console.error("RESET PASSWORD ERROR:", error);
-      setMessage(error.message || "Password reset failed");
+      setMessage(
+        error.message || "Password reset failed"
+      );
     } finally {
       setLoading(false);
     }
@@ -287,7 +371,9 @@ export default function Auth() {
       const data = await response.json().catch(() => ({}));
 
       if (!response.ok) {
-        throw new Error(data.message || "OTP verification failed");
+        throw new Error(
+          data.message || "OTP verification failed"
+        );
       }
 
       setRegistrationOtpStep(false);
@@ -299,11 +385,75 @@ export default function Auth() {
       setMode("login");
 
       setMessage(
-        data.message || "Email verified successfully. Please login."
+        data.message ||
+          "Email verified successfully. Please login."
       );
     } catch (error) {
-      console.error("REGISTRATION OTP ERROR:", error);
-      setMessage(error.message || "OTP verification failed");
+      console.error(
+        "REGISTRATION OTP ERROR:",
+        error
+      );
+
+      setMessage(
+        error.message || "OTP verification failed"
+      );
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleResendRegistrationOtp = async () => {
+    if (!email.trim()) {
+      setMessage("Email address is required.");
+      return;
+    }
+
+    setLoading(true);
+    setMessage("");
+
+    try {
+      const response = await fetch(
+        `${API_URL}/api/auth/register/resend`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            email: email.trim().toLowerCase(),
+          }),
+        }
+      );
+
+      const data = await response.json().catch(() => ({}));
+
+      if (!response.ok) {
+        throw new Error(
+          data.message ||
+            "Unable to resend verification code."
+        );
+      }
+
+      if (data.challengeToken) {
+        setChallengeToken(data.challengeToken);
+      }
+
+      setOtp("");
+
+      setMessage(
+        data.message ||
+          "Verification code sent again."
+      );
+    } catch (error) {
+      console.error(
+        "RESEND REGISTRATION OTP ERROR:",
+        error
+      );
+
+      setMessage(
+        error.message ||
+          "Unable to resend verification code."
+      );
     } finally {
       setLoading(false);
     }
@@ -320,42 +470,69 @@ export default function Auth() {
         await handleLogin();
       } else {
         if (!mobile) {
-          throw new Error("Please select your country and enter your mobile number.");
+          throw new Error(
+            "Please select your country and enter your mobile number."
+          );
         }
 
-        const response = await fetch(`${API_URL}/api/auth/register`, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({
-            username: username.trim(),
-            email: email.trim(),
-            password,
-            mobile,
-            countryCode: mobileCountry ? `+${getCountryCallingCode(mobileCountry)}` : "",
-            referralCode: referralCode.trim() || undefined,
-          }),
-        });
+        const response = await fetch(
+          `${API_URL}/api/auth/register`,
+          {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({
+              username: username.trim(),
+              email: email.trim(),
+              password,
+              mobile,
+              countryCode: mobileCountry
+                ? `+${getCountryCallingCode(
+                    mobileCountry
+                  )}`
+                : "",
+              referralCode:
+                referralCode.trim() || undefined,
+            }),
+          }
+        );
 
-        const data = await response.json().catch(() => ({}));
+        const data = await response
+          .json()
+          .catch(() => ({}));
 
         if (!response.ok) {
-          throw new Error(data.message || "Registration failed");
+          throw new Error(
+            data.message || "Registration failed"
+          );
         }
 
-        if (data.requiresEmailVerification && data.challengeToken) {
-          setChallengeToken(data.challengeToken);
+        if (
+          data.requiresEmailVerification &&
+          data.challengeToken
+        ) {
+          setChallengeToken(
+            data.challengeToken
+          );
+
           setOtp("");
+
           setMessage(
             "Verification code sent to your email. Enter the 6-digit OTP."
           );
+
           setRegistrationOtpStep(true);
-          setEmail(data.email || email.trim());
+          setEmail(
+            data.email || email.trim()
+          );
+
           return;
         }
 
-        setMessage("Registration successful! Please login.");
+        setMessage(
+          "Registration successful! Please login."
+        );
 
         setMode("login");
         setEmail("");
@@ -365,7 +542,10 @@ export default function Auth() {
       }
     } catch (error) {
       console.error("Auth error:", error);
-      setMessage(error.message || "Server error");
+
+      setMessage(
+        error.message || "Server error"
+      );
     } finally {
       setLoading(false);
     }
@@ -378,14 +558,24 @@ export default function Auth() {
     setMessage("");
   };
 
+  const resetRegistrationVerification = () => {
+    setRegistrationOtpStep(false);
+    setChallengeToken("");
+    setOtp("");
+    setMode("login");
+    setMessage("");
+  };
+
   const inputStyle = {
     width: "100%",
     boxSizing: "border-box",
     padding: "14px 15px",
     borderRadius: "12px",
-    border: "1px solid rgba(148, 163, 184, 0.18)",
+    border:
+      "1px solid rgba(148, 163, 184, 0.18)",
     outline: "none",
-    background: "rgba(15, 23, 42, 0.82)",
+    background:
+      "rgba(15, 23, 42, 0.82)",
     color: "#ffffff",
     fontSize: "14px",
     transition: "all 0.2s ease",
@@ -404,7 +594,9 @@ export default function Auth() {
     padding: "14px",
     border: "none",
     borderRadius: "12px",
-    cursor: loading ? "not-allowed" : "pointer",
+    cursor: loading
+      ? "not-allowed"
+      : "pointer",
     background: loading
       ? "linear-gradient(135deg, #475569, #334155)"
       : "linear-gradient(135deg, #2563eb, #7c3aed)",
@@ -422,18 +614,26 @@ export default function Auth() {
     width: "100%",
     marginTop: "10px",
     padding: "12px",
-    border: "1px solid rgba(148, 163, 184, 0.18)",
+    border:
+      "1px solid rgba(148, 163, 184, 0.18)",
     borderRadius: "12px",
-    cursor: loading ? "not-allowed" : "pointer",
-    background: "rgba(15, 23, 42, 0.45)",
+    cursor: loading
+      ? "not-allowed"
+      : "pointer",
+    background:
+      "rgba(15, 23, 42, 0.45)",
     color: "#94a3b8",
     fontSize: "13px",
     fontWeight: "600",
   };
 
   const messageIsSuccess =
-    message.toLowerCase().includes("successful") ||
-    message.toLowerCase().includes("verified");
+    message
+      .toLowerCase()
+      .includes("successful") ||
+    message
+      .toLowerCase()
+      .includes("verified");
 
   const renderMessage = () => {
     if (!message) return null;
@@ -450,7 +650,9 @@ export default function Auth() {
           border: messageIsSuccess
             ? "1px solid rgba(34, 197, 94, 0.25)"
             : "1px solid rgba(96, 165, 250, 0.22)",
-          color: messageIsSuccess ? "#4ade80" : "#93c5fd",
+          color: messageIsSuccess
+            ? "#4ade80"
+            : "#93c5fd",
           fontSize: "13px",
           lineHeight: "1.5",
           textAlign: "center",
@@ -468,7 +670,11 @@ export default function Auth() {
       maxLength={6}
       value={otp}
       onChange={(e) =>
-        setOtp(e.target.value.replace(/\D/g, "").slice(0, 6))
+        setOtp(
+          e.target.value
+            .replace(/\D/g, "")
+            .slice(0, 6)
+        )
       }
       placeholder="000000"
       autoComplete="one-time-code"
@@ -486,8 +692,10 @@ export default function Auth() {
   );
 
   const phoneInputStyle = {
-    "--PhoneInput-color--focus": "#60a5fa",
-    "--PhoneInputCountrySelect-marginRight": "8px",
+    "--PhoneInput-color--focus":
+      "#60a5fa",
+    "--PhoneInputCountrySelect-marginRight":
+      "8px",
   };
 
   return (
@@ -506,7 +714,8 @@ export default function Auth() {
 
         .love-primary-btn:hover:not(:disabled) {
           transform: translateY(-1px);
-          box-shadow: 0 14px 35px rgba(59, 130, 246, 0.30) !important;
+          box-shadow:
+            0 14px 35px rgba(59, 130, 246, 0.30) !important;
         }
 
         .love-tab:hover {
@@ -524,7 +733,8 @@ export default function Auth() {
           margin-bottom: 17px;
           border-radius: 11px;
           background: rgba(2, 6, 23, 0.55);
-          border: 1px solid rgba(148, 163, 184, 0.08);
+          border:
+            1px solid rgba(148, 163, 184, 0.08);
         }
 
         .love-login-method button {
@@ -545,7 +755,8 @@ export default function Auth() {
           align-items: center;
           padding: 0 12px;
           border-radius: 12px;
-          border: 1px solid rgba(148, 163, 184, 0.18);
+          border:
+            1px solid rgba(148, 163, 184, 0.18);
           background: rgba(15, 23, 42, 0.82);
           transition: all 0.2s ease;
         }
@@ -616,10 +827,36 @@ export default function Auth() {
           line-height: 1.4;
         }
 
+        .love-resend-btn {
+          width: 100%;
+          margin-top: 10px;
+          padding: 11px;
+          border:
+            1px solid rgba(96, 165, 250, 0.18);
+          border-radius: 11px;
+          background: rgba(37, 99, 235, 0.07);
+          color: #60a5fa;
+          font-size: 12px;
+          font-weight: 700;
+          cursor: pointer;
+          transition: all 0.2s ease;
+        }
+
+        .love-resend-btn:hover:not(:disabled) {
+          background: rgba(37, 99, 235, 0.14);
+          border-color: rgba(96, 165, 250, 0.30);
+        }
+
+        .love-resend-btn:disabled {
+          opacity: 0.55;
+          cursor: not-allowed;
+        }
+
         @keyframes loveFloat {
           0%, 100% {
             transform: translateY(0px);
           }
+
           50% {
             transform: translateY(-10px);
           }
@@ -630,6 +867,7 @@ export default function Auth() {
             opacity: 0.45;
             transform: scale(1);
           }
+
           50% {
             opacity: 0.75;
             transform: scale(1.08);
@@ -673,11 +911,13 @@ export default function Auth() {
             width: "280px",
             height: "280px",
             borderRadius: "50%",
-            background: "rgba(37, 99, 235, 0.12)",
+            background:
+              "rgba(37, 99, 235, 0.12)",
             filter: "blur(70px)",
             top: "-100px",
             left: "-80px",
-            animation: "lovePulse 6s ease-in-out infinite",
+            animation:
+              "lovePulse 6s ease-in-out infinite",
           }}
         />
 
@@ -687,11 +927,13 @@ export default function Auth() {
             width: "300px",
             height: "300px",
             borderRadius: "50%",
-            background: "rgba(124, 58, 237, 0.12)",
+            background:
+              "rgba(124, 58, 237, 0.12)",
             filter: "blur(80px)",
             bottom: "-120px",
             right: "-80px",
-            animation: "lovePulse 7s ease-in-out infinite",
+            animation:
+              "lovePulse 7s ease-in-out infinite",
           }}
         />
 
@@ -704,8 +946,10 @@ export default function Auth() {
             zIndex: 2,
             padding: "34px",
             borderRadius: "26px",
-            background: "rgba(7, 15, 31, 0.88)",
-            border: "1px solid rgba(148, 163, 184, 0.13)",
+            background:
+              "rgba(7, 15, 31, 0.88)",
+            border:
+              "1px solid rgba(148, 163, 184, 0.13)",
             boxShadow:
               "0 30px 90px rgba(0, 0, 0, 0.58), inset 0 1px 0 rgba(255,255,255,0.04)",
             backdropFilter: "blur(22px)",
@@ -730,7 +974,8 @@ export default function Auth() {
                   "linear-gradient(135deg, rgba(37,99,235,0.95), rgba(124,58,237,0.95))",
                 boxShadow:
                   "0 15px 40px rgba(59,130,246,0.28), inset 0 1px 0 rgba(255,255,255,0.25)",
-                animation: "loveFloat 5s ease-in-out infinite",
+                animation:
+                  "loveFloat 5s ease-in-out infinite",
               }}
             >
               <span
@@ -756,7 +1001,10 @@ export default function Auth() {
                 letterSpacing: "-1px",
               }}
             >
-              LOVE <span style={{ color: "#60a5fa" }}>Network</span>
+              LOVE{" "}
+              <span style={{ color: "#60a5fa" }}>
+                Network
+              </span>
             </h1>
 
             <p
@@ -775,8 +1023,18 @@ export default function Auth() {
 
           {forgotPasswordOtpStep ? (
             <form onSubmit={handleVerifyForgotPassword}>
-              <div style={{ textAlign: "center", marginBottom: "22px" }}>
-                <div style={{ fontSize: "38px", marginBottom: "12px" }}>
+              <div
+                style={{
+                  textAlign: "center",
+                  marginBottom: "22px",
+                }}
+              >
+                <div
+                  style={{
+                    fontSize: "38px",
+                    marginBottom: "12px",
+                  }}
+                >
                   🔐
                 </div>
 
@@ -800,20 +1058,42 @@ export default function Auth() {
                 >
                   Enter the verification code sent to
                   <br />
-                  <strong style={{ color: "#e2e8f0" }}>{email}</strong>
+                  <strong
+                    style={{
+                      color: "#e2e8f0",
+                    }}
+                  >
+                    {email}
+                  </strong>
                 </p>
               </div>
 
-              <div style={{ marginBottom: "14px" }}>
+              <div
+                style={{
+                  marginBottom: "14px",
+                }}
+              >
                 {renderOtpInput()}
               </div>
 
-              <div style={{ marginBottom: "12px" }}>
+              <div
+                style={{
+                  marginBottom: "12px",
+                }}
+              >
                 <input
                   className="love-auth-input"
-                  type={showResetPassword ? "text" : "password"}
+                  type={
+                    showResetPassword
+                      ? "text"
+                      : "password"
+                  }
                   value={resetPassword}
-                  onChange={(e) => setResetPassword(e.target.value)}
+                  onChange={(e) =>
+                    setResetPassword(
+                      e.target.value
+                    )
+                  }
                   placeholder="New password (min 8 characters)"
                   autoComplete="new-password"
                   minLength={8}
@@ -822,13 +1102,23 @@ export default function Auth() {
                 />
               </div>
 
-              <div style={{ marginBottom: "18px" }}>
+              <div
+                style={{
+                  marginBottom: "18px",
+                }}
+              >
                 <input
                   className="love-auth-input"
-                  type={showConfirmResetPassword ? "text" : "password"}
+                  type={
+                    showConfirmResetPassword
+                      ? "text"
+                      : "password"
+                  }
                   value={confirmResetPassword}
                   onChange={(e) =>
-                    setConfirmResetPassword(e.target.value)
+                    setConfirmResetPassword(
+                      e.target.value
+                    )
                   }
                   placeholder="Confirm new password"
                   autoComplete="new-password"
@@ -848,14 +1138,18 @@ export default function Auth() {
                 <button
                   type="button"
                   onClick={() =>
-                    setShowResetPassword(!showResetPassword)
+                    setShowResetPassword(
+                      !showResetPassword
+                    )
                   }
                   style={{
                     flex: 1,
                     padding: "8px",
-                    border: "1px solid rgba(148,163,184,0.15)",
+                    border:
+                      "1px solid rgba(148,163,184,0.15)",
                     borderRadius: "9px",
-                    background: "rgba(15,23,42,0.5)",
+                    background:
+                      "rgba(15,23,42,0.5)",
                     color: "#94a3b8",
                     fontSize: "11px",
                     cursor: "pointer",
@@ -876,9 +1170,11 @@ export default function Auth() {
                   style={{
                     flex: 1,
                     padding: "8px",
-                    border: "1px solid rgba(148,163,184,0.15)",
+                    border:
+                      "1px solid rgba(148,163,184,0.15)",
                     borderRadius: "9px",
-                    background: "rgba(15,23,42,0.5)",
+                    background:
+                      "rgba(15,23,42,0.5)",
                     color: "#94a3b8",
                     fontSize: "11px",
                     cursor: "pointer",
@@ -898,7 +1194,9 @@ export default function Auth() {
                 disabled={loading}
                 style={primaryButtonStyle}
               >
-                {loading ? "Resetting..." : "Reset Password"}
+                {loading
+                  ? "Resetting..."
+                  : "Reset Password"}
               </button>
 
               <button
@@ -919,8 +1217,18 @@ export default function Auth() {
             </form>
           ) : forgotPasswordStep ? (
             <form onSubmit={handleForgotPassword}>
-              <div style={{ textAlign: "center", marginBottom: "24px" }}>
-                <div style={{ fontSize: "40px", marginBottom: "12px" }}>
+              <div
+                style={{
+                  textAlign: "center",
+                  marginBottom: "24px",
+                }}
+              >
+                <div
+                  style={{
+                    fontSize: "40px",
+                    marginBottom: "12px",
+                  }}
+                >
                   🔑
                 </div>
 
@@ -942,19 +1250,29 @@ export default function Auth() {
                     lineHeight: "1.6",
                   }}
                 >
-                  Enter your registered email and we'll send you
+                  Enter your registered email and we'll
+                  send you
                   <br />
                   a secure verification code.
                 </p>
               </div>
 
-              <div style={{ marginBottom: "18px" }}>
-                <label style={labelStyle}>Email Address</label>
+              <div
+                style={{
+                  marginBottom: "18px",
+                }}
+              >
+                <label style={labelStyle}>
+                  Email Address
+                </label>
+
                 <input
                   className="love-auth-input"
                   type="email"
                   value={email}
-                  onChange={(e) => setEmail(e.target.value)}
+                  onChange={(e) =>
+                    setEmail(e.target.value)
+                  }
                   placeholder="you@example.com"
                   autoComplete="email"
                   required
@@ -970,7 +1288,9 @@ export default function Auth() {
                 disabled={loading}
                 style={primaryButtonStyle}
               >
-                {loading ? "Sending..." : "Send Verification Code"}
+                {loading
+                  ? "Sending..."
+                  : "Send Verification Code"}
               </button>
 
               <button
@@ -987,9 +1307,31 @@ export default function Auth() {
               </button>
             </form>
           ) : registrationOtpStep ? (
-            <form onSubmit={handleVerifyRegistrationOtp}>
-              <div style={{ textAlign: "center", marginBottom: "24px" }}>
-                <div style={{ fontSize: "40px", marginBottom: "12px" }}>
+            <form
+              onSubmit={handleVerifyRegistrationOtp}
+            >
+              <div
+                style={{
+                  textAlign: "center",
+                  marginBottom: "24px",
+                }}
+              >
+                <div
+                  style={{
+                    width: "64px",
+                    height: "64px",
+                    margin: "0 auto 14px",
+                    borderRadius: "20px",
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    background:
+                      "linear-gradient(135deg, rgba(37,99,235,0.18), rgba(124,58,237,0.18))",
+                    border:
+                      "1px solid rgba(96,165,250,0.18)",
+                    fontSize: "28px",
+                  }}
+                >
                   ✉️
                 </div>
 
@@ -1013,11 +1355,21 @@ export default function Auth() {
                 >
                   We sent a 6-digit verification code to
                   <br />
-                  <strong style={{ color: "#e2e8f0" }}>{email}</strong>
+                  <strong
+                    style={{
+                      color: "#e2e8f0",
+                    }}
+                  >
+                    {email}
+                  </strong>
                 </p>
               </div>
 
-              <div style={{ marginBottom: "18px" }}>
+              <div
+                style={{
+                  marginBottom: "18px",
+                }}
+              >
                 {renderOtpInput()}
               </div>
 
@@ -1026,24 +1378,46 @@ export default function Auth() {
               <button
                 className="love-primary-btn"
                 type="submit"
-                disabled={loading}
-                style={primaryButtonStyle}
+                disabled={
+                  loading ||
+                  otp.length !== 6
+                }
+                style={{
+                  ...primaryButtonStyle,
+                  background:
+                    loading ||
+                    otp.length !== 6
+                      ? "linear-gradient(135deg, #334155, #475569)"
+                      : "linear-gradient(135deg, #2563eb, #7c3aed)",
+                }}
               >
-                {loading ? "Verifying..." : "Verify Email"}
+                {loading
+                  ? "Verifying..."
+                  : "Verify Email"}
               </button>
 
               <button
                 type="button"
-                onClick={() => {
-                  setRegistrationOtpStep(false);
-                  setChallengeToken("");
-                  setOtp("");
-                  setMode("register");
-                  setMessage("");
-                }}
-                style={secondaryButtonStyle}
+                className="love-resend-btn"
+                onClick={
+                  handleResendRegistrationOtp
+                }
+                disabled={loading}
               >
-                ← Back to Register
+                {loading
+                  ? "Please wait..."
+                  : "Resend Verification Code"}
+              </button>
+
+              <button
+                type="button"
+                onClick={
+                  resetRegistrationVerification
+                }
+                style={secondaryButtonStyle}
+                disabled={loading}
+              >
+                ← Back to Login
               </button>
             </form>
           ) : !twoFactorStep ? (
@@ -1055,8 +1429,10 @@ export default function Auth() {
                   marginBottom: "25px",
                   padding: "5px",
                   borderRadius: "13px",
-                  background: "rgba(2, 6, 23, 0.65)",
-                  border: "1px solid rgba(148, 163, 184, 0.08)",
+                  background:
+                    "rgba(2, 6, 23, 0.65)",
+                  border:
+                    "1px solid rgba(148, 163, 184, 0.08)",
                 }}
               >
                 <button
@@ -1076,7 +1452,10 @@ export default function Auth() {
                       mode === "login"
                         ? "linear-gradient(135deg, #2563eb, #4f46e5)"
                         : "transparent",
-                    color: mode === "login" ? "#ffffff" : "#64748b",
+                    color:
+                      mode === "login"
+                        ? "#ffffff"
+                        : "#64748b",
                     fontWeight: "700",
                     fontSize: "13px",
                     boxShadow:
@@ -1106,7 +1485,9 @@ export default function Auth() {
                         ? "linear-gradient(135deg, #2563eb, #4f46e5)"
                         : "transparent",
                     color:
-                      mode === "register" ? "#ffffff" : "#64748b",
+                      mode === "register"
+                        ? "#ffffff"
+                        : "#64748b",
                     fontWeight: "700",
                     fontSize: "13px",
                     boxShadow:
@@ -1121,14 +1502,24 @@ export default function Auth() {
 
               <form onSubmit={handleSubmit}>
                 {mode === "register" && (
-                  <div style={{ marginBottom: "17px" }}>
-                    <label style={labelStyle}>Username</label>
+                  <div
+                    style={{
+                      marginBottom: "17px",
+                    }}
+                  >
+                    <label style={labelStyle}>
+                      Username
+                    </label>
 
                     <input
                       className="love-auth-input"
                       type="text"
                       value={username}
-                      onChange={(e) => setUsername(e.target.value)}
+                      onChange={(e) =>
+                        setUsername(
+                          e.target.value
+                        )
+                      }
                       placeholder="Enter your username"
                       required
                       autoComplete="username"
@@ -1182,8 +1573,14 @@ export default function Auth() {
                 )}
 
                 {mode === "register" && (
-                  <div style={{ marginBottom: "17px" }}>
-                    <label style={labelStyle}>Mobile Number</label>
+                  <div
+                    style={{
+                      marginBottom: "17px",
+                    }}
+                  >
+                    <label style={labelStyle}>
+                      Mobile Number
+                    </label>
 
                     <div
                       className="love-phone-wrapper"
@@ -1195,68 +1592,106 @@ export default function Auth() {
                         countryCallingCodeEditable={false}
                         value={mobile}
                         onChange={setMobile}
-                        onCountryChange={(country) => setMobileCountry(country || "PK")}
+                        onCountryChange={(country) =>
+                          setMobileCountry(
+                            country || "PK"
+                          )
+                        }
                         placeholder="300 1234567"
                       />
                     </div>
 
                     <div className="love-phone-hint">
-                      Select your country flag and enter your mobile number.
+                      Select your country flag and enter your
+                      mobile number.
                     </div>
                   </div>
                 )}
 
-                {mode === "login" && loginMethod === "email" && (
-                  <div style={{ marginBottom: "17px" }}>
-                    <label style={labelStyle}>Email Address</label>
-
-                    <input
-                      className="love-auth-input"
-                      type="email"
-                      value={email}
-                      onChange={(e) => setEmail(e.target.value)}
-                      placeholder="you@example.com"
-                      required
-                      autoComplete="email"
-                      style={inputStyle}
-                    />
-                  </div>
-                )}
-
-                {mode === "login" && loginMethod === "mobile" && (
-                  <div style={{ marginBottom: "17px" }}>
-                    <label style={labelStyle}>Mobile Number</label>
-
+                {mode === "login" &&
+                  loginMethod === "email" && (
                     <div
-                      className="love-phone-wrapper"
-                      style={phoneInputStyle}
+                      style={{
+                        marginBottom: "17px",
+                      }}
                     >
-                      <PhoneInput
-                        international
-                        defaultCountry="PK"
-                        countryCallingCodeEditable={false}
-                        value={mobile}
-                        onChange={setMobile}
-                        onCountryChange={(country) => setMobileCountry(country || "PK")}
-                        placeholder="300 1234567"
+                      <label style={labelStyle}>
+                        Email Address
+                      </label>
+
+                      <input
+                        className="love-auth-input"
+                        type="email"
+                        value={email}
+                        onChange={(e) =>
+                          setEmail(
+                            e.target.value
+                          )
+                        }
+                        placeholder="you@example.com"
+                        required
+                        autoComplete="email"
+                        style={inputStyle}
                       />
                     </div>
+                  )}
 
-                    <div className="love-phone-hint">
-                      Select your country flag and enter your registered number.
+                {mode === "login" &&
+                  loginMethod === "mobile" && (
+                    <div
+                      style={{
+                        marginBottom: "17px",
+                      }}
+                    >
+                      <label style={labelStyle}>
+                        Mobile Number
+                      </label>
+
+                      <div
+                        className="love-phone-wrapper"
+                        style={phoneInputStyle}
+                      >
+                        <PhoneInput
+                          international
+                          defaultCountry="PK"
+                          countryCallingCodeEditable={false}
+                          value={mobile}
+                          onChange={setMobile}
+                          onCountryChange={(country) =>
+                            setMobileCountry(
+                              country || "PK"
+                            )
+                          }
+                          placeholder="300 1234567"
+                        />
+                      </div>
+
+                      <div className="love-phone-hint">
+                        Select your country flag and enter your
+                        registered number.
+                      </div>
                     </div>
-                  </div>
-                )}
+                  )}
 
                 {mode === "register" && (
-                  <div style={{ marginBottom: "17px" }}>
-                    <label style={labelStyle}>Email Address</label>
+                  <div
+                    style={{
+                      marginBottom: "17px",
+                    }}
+                  >
+                    <label style={labelStyle}>
+                      Email Address
+                    </label>
 
                     <input
                       className="love-auth-input"
                       type="email"
                       value={email}
-                      onChange={(e) => setEmail(e.target.value)}
+                      onChange={(e) =>
+                        setEmail(
+                          e.target.value
+                        )
+                      }
                       placeholder="you@example.com"
                       required
                       autoComplete="email"
@@ -1266,7 +1701,11 @@ export default function Auth() {
                 )}
 
                 {mode === "register" && (
-                  <div style={{ marginBottom: "17px" }}>
+                  <div
+                    style={{
+                      marginBottom: "17px",
+                    }}
+                  >
                     <label style={labelStyle}>
                       Referral Code{" "}
                       <span
@@ -1284,7 +1723,9 @@ export default function Auth() {
                       type="text"
                       value={referralCode}
                       onChange={(e) =>
-                        setReferralCode(e.target.value.toUpperCase())
+                        setReferralCode(
+                          e.target.value.toUpperCase()
+                        )
                       }
                       placeholder="Enter referral code"
                       autoComplete="off"
@@ -1293,15 +1734,33 @@ export default function Auth() {
                   </div>
                 )}
 
-                <div style={{ marginBottom: "10px" }}>
-                  <label style={labelStyle}>Password</label>
+                <div
+                  style={{
+                    marginBottom: "10px",
+                  }}
+                >
+                  <label style={labelStyle}>
+                    Password
+                  </label>
 
-                  <div style={{ position: "relative" }}>
+                  <div
+                    style={{
+                      position: "relative",
+                    }}
+                  >
                     <input
                       className="love-auth-input"
-                      type={showPassword ? "text" : "password"}
+                      type={
+                        showPassword
+                          ? "text"
+                          : "password"
+                      }
                       value={password}
-                      onChange={(e) => setPassword(e.target.value)}
+                      onChange={(e) =>
+                        setPassword(
+                          e.target.value
+                        )
+                      }
                       placeholder="Enter your password"
                       required
                       minLength={6}
@@ -1318,15 +1777,21 @@ export default function Auth() {
 
                     <button
                       type="button"
-                      onClick={() => setShowPassword(!showPassword)}
+                      onClick={() =>
+                        setShowPassword(
+                          !showPassword
+                        )
+                      }
                       style={{
                         position: "absolute",
                         top: "50%",
                         right: "9px",
-                        transform: "translateY(-50%)",
+                        transform:
+                          "translateY(-50%)",
                         border: "none",
                         borderRadius: "8px",
-                        background: "rgba(51, 65, 85, 0.55)",
+                        background:
+                          "rgba(51, 65, 85, 0.55)",
                         color: "#94a3b8",
                         padding: "7px 9px",
                         fontSize: "11px",
@@ -1334,7 +1799,9 @@ export default function Auth() {
                         cursor: "pointer",
                       }}
                     >
-                      {showPassword ? "Hide" : "Show"}
+                      {showPassword
+                        ? "Hide"
+                        : "Show"}
                     </button>
                   </div>
                 </div>
@@ -1343,7 +1810,8 @@ export default function Auth() {
                   <div
                     style={{
                       display: "flex",
-                      justifyContent: "flex-end",
+                      justifyContent:
+                        "flex-end",
                       marginBottom: "19px",
                     }}
                   >
@@ -1351,12 +1819,15 @@ export default function Auth() {
                       className="love-link"
                       type="button"
                       onClick={() => {
-                        setForgotPasswordStep(true);
+                        setForgotPasswordStep(
+                          true
+                        );
                         setMessage("");
                       }}
                       style={{
                         border: "none",
-                        background: "transparent",
+                        background:
+                          "transparent",
                         color: "#60a5fa",
                         cursor: "pointer",
                         fontSize: "12px",
@@ -1375,7 +1846,8 @@ export default function Auth() {
                       marginBottom: "19px",
                       padding: "10px 12px",
                       borderRadius: "10px",
-                      background: "rgba(37,99,235,0.06)",
+                      background:
+                        "rgba(37,99,235,0.06)",
                       border:
                         "1px solid rgba(96,165,250,0.10)",
                       color: "#64748b",
@@ -1383,8 +1855,8 @@ export default function Auth() {
                       lineHeight: "1.5",
                     }}
                   >
-                    By creating an account, you agree to use LOVE
-                    Network responsibly.
+                    By creating an account, you agree to use
+                    LOVE Network responsibly.
                   </div>
                 )}
 
@@ -1428,16 +1900,23 @@ export default function Auth() {
                       height: "6px",
                       borderRadius: "50%",
                       background: "#22c55e",
-                      boxShadow: "0 0 10px rgba(34,197,94,0.7)",
+                      boxShadow:
+                        "0 0 10px rgba(34,197,94,0.7)",
                     }}
                   />
+
                   LOVE Network secure access
                 </div>
               </div>
             </>
           ) : (
             <form onSubmit={handleVerify2FA}>
-              <div style={{ textAlign: "center", marginBottom: "25px" }}>
+              <div
+                style={{
+                  textAlign: "center",
+                  marginBottom: "25px",
+                }}
+              >
                 <div
                   style={{
                     width: "64px",
@@ -1481,7 +1960,11 @@ export default function Auth() {
                 </p>
               </div>
 
-              <div style={{ marginBottom: "19px" }}>
+              <div
+                style={{
+                  marginBottom: "19px",
+                }}
+              >
                 {renderOtpInput()}
               </div>
 
@@ -1490,16 +1973,22 @@ export default function Auth() {
               <button
                 className="love-primary-btn"
                 type="submit"
-                disabled={loading || otp.length !== 6}
+                disabled={
+                  loading ||
+                  otp.length !== 6
+                }
                 style={{
                   ...primaryButtonStyle,
                   background:
-                    loading || otp.length !== 6
+                    loading ||
+                    otp.length !== 6
                       ? "linear-gradient(135deg, #334155, #475569)"
                       : "linear-gradient(135deg, #2563eb, #7c3aed)",
                 }}
               >
-                {loading ? "Verifying..." : "Verify & Login"}
+                {loading
+                  ? "Verifying..."
+                  : "Verify & Login"}
               </button>
 
               <button
@@ -1518,6 +2007,13 @@ export default function Auth() {
   );
 }
 
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const ref = params.get("ref");
 
-
+    if (ref && ref.trim()) {
+      setReferralCode(ref.trim().toUpperCase());
+      setMode("register");
+    }
+  }, []);
 
