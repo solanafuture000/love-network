@@ -5,6 +5,7 @@ const crypto = require("crypto");
 
 const db = require("../database-pg");
 const { sendOtpEmail } = require("../services/otpService");
+const authenticateToken = require("../middleware/auth");
 
 const router = express.Router();
 
@@ -2016,3 +2017,62 @@ router.post(
 ========================================================= */
 
 module.exports = router;
+
+/* =========================================================
+   2FA STATUS
+========================================================= */
+
+router.get(
+  "/otp/2fa/status",
+  authenticateToken,
+  async (req, res) => {
+    try {
+      const userId = req.user.userId;
+
+      const result = await db.query(
+        `
+        SELECT
+          id,
+          two_factor_enabled
+        FROM users
+        WHERE id = $1
+        LIMIT 1
+        `,
+        [userId]
+      );
+
+      const user = result.rows[0];
+
+      if (!user) {
+        return res.status(404).json({
+          success: false,
+          message: "User not found"
+        });
+      }
+
+      const enabled =
+        user.two_factor_enabled === true ||
+        Number(user.two_factor_enabled) === 1;
+
+      return res.json({
+        success: true,
+        enabled,
+        twoFactorEnabled: enabled
+      });
+
+    } catch (error) {
+      console.error(
+        "2FA STATUS ERROR:",
+        error
+      );
+
+      return res.status(500).json({
+        success: false,
+        message: "Unable to load 2FA status"
+      });
+    }
+  }
+);
+
+
+
