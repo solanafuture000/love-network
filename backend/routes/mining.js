@@ -1,25 +1,15 @@
-﻿const express = require("express");
-const db = require("../database");
+const express = require("express");
+const db = require("../database-pg");
 const authenticateToken = require("../middleware/auth");
 
 const router = express.Router();
 
 const MAX_SESSION_SECONDS = 12 * 60 * 60;
 
-function getMiningConfig() {
-  const config = db
-    .prepare("SELECT * FROM mining_config WHERE id = 1")
-    .get();
-
-  if (!config) {
-    throw new Error("Mining configuration not found");
-  }
-
-  return config;
-}
-
 function getCurrentMiningPhase(totalMined, config) {
-  if (totalMined >= config.phase4_limit) {
+  const mined = Number(totalMined || 0);
+
+  if (mined >= Number(config.phase4_limit)) {
     return {
       phase: 4,
       ratePerHour: 0,
@@ -27,33 +17,33 @@ function getCurrentMiningPhase(totalMined, config) {
     };
   }
 
-  if (totalMined >= config.phase3_limit) {
+  if (mined >= Number(config.phase3_limit)) {
     return {
       phase: 4,
-      ratePerHour: config.phase4_rate,
+      ratePerHour: Number(config.phase4_rate),
       miningEnabled: true
     };
   }
 
-  if (totalMined >= config.phase2_limit) {
+  if (mined >= Number(config.phase2_limit)) {
     return {
       phase: 3,
-      ratePerHour: config.phase3_rate,
+      ratePerHour: Number(config.phase3_rate),
       miningEnabled: true
     };
   }
 
-  if (totalMined >= config.phase1_limit) {
+  if (mined >= Number(config.phase1_limit)) {
     return {
       phase: 2,
-      ratePerHour: config.phase2_rate,
+      ratePerHour: Number(config.phase2_rate),
       miningEnabled: true
     };
   }
 
   return {
     phase: 1,
-    ratePerHour: config.phase1_rate,
+    ratePerHour: Number(config.phase1_rate),
     miningEnabled: true
   };
 }
@@ -61,9 +51,15 @@ function getCurrentMiningPhase(totalMined, config) {
 function parseDatabaseDate(value) {
   if (!value) return new Date();
 
-  const normalized = value.includes("T")
-    ? value
-    : value.replace(" ", "T");
+  if (value instanceof Date) {
+    return value;
+  }
+
+  const stringValue = String(value);
+
+  const normalized = stringValue.includes("T")
+    ? stringValue
+    : stringValue.replace(" ", "T");
 
   return new Date(
     normalized.endsWith("Z")
@@ -72,103 +68,217 @@ function parseDatabaseDate(value) {
   );
 }
 
-function settleMiningSession(session, userId) {
-  const wallet = db
-    .prepare(`
-      SELECT id, balance, total_mined
-      FROM wallets
-      WHERE user_id = ?
-    `)
-    .get(userId);
+async function getMiningConfig(client = db) {
+  const result = await client.query(
+    `
+    SELECT *
+    FROM mining_config
+    WHERE id = 1
+    LIMIT 1
+    `
+  );
 
-  if (!wallet) {
-    throw new Error("Wallet not found");
+  const config = result.rows[0];
+
+  if (!config) {
+    throw new Error("Mining configuration not found");
   }
 
-  const config = getMiningConfig();
+  return config;
+}
 
-  const startedAt = parseDatabaseDate(session.started_at);
-  const now = new Date();
-
-  const elapsedSeconds = Math.max(
-    0,
-    Math.floor((now - startedAt) / 1000)
+async function getActiveSession(userId, client = db) {
+  const result = await client.query(
+    `
+    SELECT *
+    FROM mining_sessions
+    WHERE user_id = $1
+      AND status = 'active'
+    ORDER BY id DESC
+    LIMIT 1
+    `,
+    [userId]
   );
 
-  const durationSeconds = Math.min(
-    elapsedSeconds,
-    MAX_SESSION_SECONDS
-  );
+  return result.rows[0] || null;
+}
 
-  const rewardPerHour = Number(session.reward_per_hour || 0);
+async function settleMiningSession(session, userId) {
+  const client = await db.pool.connect();
 
-  const calculatedReward =
-    (durationSeconds / 3600) * rewardPerHour;
+  try {
+    await client.query("BEGIN");
 
-  const remainingPool = Math.max(
-    0,
-    Number(config.total_mining_allocation) -
-      Number(config.total_mined)
-  );
+    const walletResult = await client.query(
+      `
+      SELECT
+        id,
+        balance,
+        total_mined
+      FROM wallets
+      WHERE user_id = $1
+      FOR UPDATE
+      `,
+      [userId]
+    );
 
-  const reward = Number(
-    Math.min(
-      calculatedReward,
-      remainingPool
-    ).toFixed(8)
-  );
+    let wallet = walletResult.rows[0] || null;
 
-  const transaction = db.transaction(() => {
-    const updateSession = db.prepare(`
+    if (!wallet) {
+      const walletInsert = await client.query(
+        `
+        INSERT INTO wallets
+          (user_id, balance, total_mined)
+        VALUES
+          ($1, 0, 0)
+        ON CONFLICT (user_id) DO NOTHING
+        RETURNING
+          id,
+          balance,
+          total_mined
+        `,
+        [userId]
+      );
+
+      wallet = walletInsert.rows[0] || null;
+
+      if (!wallet) {
+        const retryWallet = await client.query(
+          `
+          SELECT
+            id,
+            balance,
+            total_mined
+          FROM wallets
+          WHERE user_id = $1
+          FOR UPDATE
+          `,
+          [userId]
+        );
+
+        wallet = retryWallet.rows[0] || null;
+      }
+    }
+
+    if (!wallet) {
+      throw new Error("Wallet not found");
+    }
+
+    const configResult = await client.query(
+      `
+      SELECT *
+      FROM mining_config
+      WHERE id = 1
+      FOR UPDATE
+      `
+    );
+
+    const config = configResult.rows[0];
+
+    if (!config) {
+      throw new Error("Mining configuration not found");
+    }
+
+    const startedAt = parseDatabaseDate(session.started_at);
+    const now = new Date();
+
+    const elapsedSeconds = Math.max(
+      0,
+      Math.floor((now - startedAt) / 1000)
+    );
+
+    const durationSeconds = Math.min(
+      elapsedSeconds,
+      MAX_SESSION_SECONDS
+    );
+
+    const rewardPerHour = Number(
+      session.reward_per_hour || 0
+    );
+
+    const calculatedReward =
+      (durationSeconds / 3600) * rewardPerHour;
+
+    const remainingPool = Math.max(
+      0,
+      Number(config.total_mining_allocation) -
+        Number(config.total_mined)
+    );
+
+    const reward = Number(
+      Math.min(
+        calculatedReward,
+        remainingPool
+      ).toFixed(8)
+    );
+
+    const sessionUpdate = await client.query(
+      `
       UPDATE mining_sessions
       SET
         stopped_at = CURRENT_TIMESTAMP,
-        duration_seconds = ?,
-        reward = ?,
+        duration_seconds = $1,
+        reward = $2,
         status = 'completed'
-      WHERE id = ?
-        AND user_id = ?
+      WHERE id = $3
+        AND user_id = $4
         AND status = 'active'
-    `);
-
-    const result = updateSession.run(
-      durationSeconds,
-      reward,
-      session.id,
-      userId
+      RETURNING *
+      `,
+      [
+        durationSeconds,
+        reward,
+        session.id,
+        userId
+      ]
     );
 
-    if (result.changes !== 1) {
+    if (sessionUpdate.rowCount !== 1) {
       throw new Error("Mining session was already settled");
     }
 
+    const completedSession = sessionUpdate.rows[0];
+
     const newBalance = Number(
-      (Number(wallet.balance) + reward).toFixed(8)
+      (
+        Number(wallet.balance) +
+        reward
+      ).toFixed(8)
     );
 
     const newWalletTotalMined = Number(
-      (Number(wallet.total_mined) + reward).toFixed(8)
+      (
+        Number(wallet.total_mined) +
+        reward
+      ).toFixed(8)
     );
 
     const newGlobalTotalMined = Number(
-      (Number(config.total_mined) + reward).toFixed(8)
+      (
+        Number(config.total_mined) +
+        reward
+      ).toFixed(8)
     );
 
-    db.prepare(`
+    await client.query(
+      `
       UPDATE wallets
       SET
-        balance = ?,
-        total_mined = ?,
+        balance = $1,
+        total_mined = $2,
         updated_at = CURRENT_TIMESTAMP
-      WHERE user_id = ?
-    `).run(
-      newBalance,
-      newWalletTotalMined,
-      userId
+      WHERE user_id = $3
+      `,
+      [
+        newBalance,
+        newWalletTotalMined,
+        userId
+      ]
     );
 
     if (reward > 0) {
-      db.prepare(`
+      await client.query(
+        `
         INSERT INTO wallet_transactions
         (
           user_id,
@@ -178,22 +288,27 @@ function settleMiningSession(session, userId) {
           mining_session_id,
           description
         )
-        VALUES (?, ?, ?, ?, ?, ?)
-      `).run(
-        userId,
-        "MINING_REWARD",
-        reward,
-        newBalance,
-        session.id,
-        durationSeconds >= MAX_SESSION_SECONDS
-          ? "Mining reward - 12 hour session completed"
-          : "Mining reward"
+        VALUES
+        ($1, $2, $3, $4, $5, $6)
+        `,
+        [
+          userId,
+          "MINING_REWARD",
+          reward,
+          newBalance,
+          session.id,
+          durationSeconds >= MAX_SESSION_SECONDS
+            ? "Mining reward - 12 hour session completed"
+            : "Mining reward"
+        ]
       );
 
       // ==========================================
-      // REFERRAL REWARD - 10%
+      // LEVEL 1 REFERRAL REWARD - 10%
+      // Only the direct referrer receives reward.
       // ==========================================
-      const referral = db.prepare(`
+      const referralResult = await client.query(
+        `
         SELECT
           id,
           referrer_user_id,
@@ -201,9 +316,13 @@ function settleMiningSession(session, userId) {
           status,
           reward_rate
         FROM referrals
-        WHERE referred_user_id = ?
+        WHERE referred_user_id = $1
         LIMIT 1
-      `).get(userId);
+        `,
+        [userId]
+      );
+
+      const referral = referralResult.rows[0] || null;
 
       if (referral) {
         const rewardRate =
@@ -212,32 +331,50 @@ function settleMiningSession(session, userId) {
             : 0.10;
 
         const referralReward = Number(
-          (reward * rewardRate).toFixed(8)
+          (
+            reward *
+            rewardRate
+          ).toFixed(8)
         );
 
         if (referralReward > 0) {
-          const existingReferralReward = db.prepare(`
+          const existingRewardResult = await client.query(
+            `
             SELECT id
             FROM referral_rewards
-            WHERE source_mining_session_id = ?
+            WHERE source_mining_session_id = $1
             LIMIT 1
-          `).get(session.id);
+            `,
+            [session.id]
+          );
+
+          const existingReferralReward =
+            existingRewardResult.rows[0] || null;
 
           if (!existingReferralReward) {
-            const kyc = db.prepare(`
+            const kycResult = await client.query(
+              `
               SELECT status
               FROM user_kyc
-              WHERE user_id = ?
+              WHERE user_id = $1
               LIMIT 1
-            `).get(userId);
+              `,
+              [userId]
+            );
+
+            const kyc = kycResult.rows[0] || null;
 
             const kycApproved =
-              kyc && kyc.status === "APPROVED";
+              kyc &&
+              String(kyc.status).toUpperCase() === "APPROVED";
 
             const rewardStatus =
-              kycApproved ? "CREDITED" : "PENDING";
+              kycApproved
+                ? "CREDITED"
+                : "PENDING";
 
-            db.prepare(`
+            await client.query(
+              `
               INSERT INTO referral_rewards
               (
                 referrer_user_id,
@@ -247,48 +384,64 @@ function settleMiningSession(session, userId) {
                 reward_date,
                 source_mining_session_id
               )
-              VALUES (?, ?, ?, ?, date('now'), ?)
-            `).run(
-              referral.referrer_user_id,
-              userId,
-              referralReward,
-              rewardStatus,
-              session.id
+              VALUES
+              ($1, $2, $3, $4, CURRENT_DATE, $5)
+              `,
+              [
+                referral.referrer_user_id,
+                userId,
+                referralReward,
+                rewardStatus,
+                session.id
+              ]
             );
 
-            // Only migrate referral reward to referrer's
-            // wallet after KYC approval.
             if (kycApproved) {
-              const referrerWallet = db.prepare(`
-                SELECT balance
-                FROM wallets
-                WHERE user_id = ?
-                LIMIT 1
-              `).get(referral.referrer_user_id);
+              const referrerWalletResult =
+                await client.query(
+                  `
+                  SELECT
+                    balance
+                  FROM wallets
+                  WHERE user_id = $1
+                  FOR UPDATE
+                  `,
+                  [referral.referrer_user_id]
+                );
+
+              const referrerWallet =
+                referrerWalletResult.rows[0] || null;
 
               if (!referrerWallet) {
-                throw new Error("Referrer wallet not found");
+                throw new Error(
+                  "Referrer wallet not found"
+                );
               }
 
-              const referrerNewBalance = Number(
-                (
-                  Number(referrerWallet.balance) +
-                  referralReward
-                ).toFixed(8)
-              );
+              const referrerNewBalance =
+                Number(
+                  (
+                    Number(referrerWallet.balance) +
+                    referralReward
+                  ).toFixed(8)
+                );
 
-              db.prepare(`
+              await client.query(
+                `
                 UPDATE wallets
                 SET
-                  balance = ?,
+                  balance = $1,
                   updated_at = CURRENT_TIMESTAMP
-                WHERE user_id = ?
-              `).run(
-                referrerNewBalance,
-                referral.referrer_user_id
+                WHERE user_id = $2
+                `,
+                [
+                  referrerNewBalance,
+                  referral.referrer_user_id
+                ]
               );
 
-              db.prepare(`
+              await client.query(
+                `
                 INSERT INTO wallet_transactions
                 (
                   user_id,
@@ -298,25 +451,32 @@ function settleMiningSession(session, userId) {
                   mining_session_id,
                   description
                 )
-                VALUES (?, ?, ?, ?, ?, ?)
-              `).run(
-                referral.referrer_user_id,
-                "REFERRAL_REWARD",
-                referralReward,
-                referrerNewBalance,
-                session.id,
-                "Referral reward - 10% of referred user's mining reward"
+                VALUES
+                ($1, $2, $3, $4, $5, $6)
+                `,
+                [
+                  referral.referrer_user_id,
+                  "REFERRAL_REWARD",
+                  referralReward,
+                  referrerNewBalance,
+                  session.id,
+                  "Referral reward - 10% of direct referred user's mining reward"
+                ]
               );
 
-              db.prepare(`
+              await client.query(
+                `
                 UPDATE referrals
                 SET
-                  total_reward = total_reward + ?,
+                  total_reward =
+                    COALESCE(total_reward, 0) + $1,
                   updated_at = CURRENT_TIMESTAMP
-                WHERE id = ?
-              `).run(
-                referralReward,
-                referral.id
+                WHERE id = $2
+                `,
+                [
+                  referralReward,
+                  referral.id
+                ]
               );
             }
           }
@@ -324,53 +484,55 @@ function settleMiningSession(session, userId) {
       }
     }
 
-    db.prepare("UPDATE users SET successful_mining_sessions = successful_mining_sessions + 1, last_mining_date = date('now') WHERE id = ?").run(userId);
+    await client.query(
+      `
+      UPDATE users
+      SET
+        successful_mining_sessions =
+          COALESCE(successful_mining_sessions, 0) + 1,
+        last_mining_date = CURRENT_DATE
+      WHERE id = $1
+      `,
+      [userId]
+    );
 
-    if (
-      newGlobalTotalMined >=
-      Number(config.total_mining_allocation)
-    ) {
-      db.prepare(`
-        UPDATE mining_config
-        SET
-          total_mined = ?,
-          mining_enabled = 0,
-          updated_at = CURRENT_TIMESTAMP
-        WHERE id = 1
-      `).run(newGlobalTotalMined);
-    } else {
-      db.prepare(`
-        UPDATE mining_config
-        SET
-          total_mined = ?,
-          updated_at = CURRENT_TIMESTAMP
-        WHERE id = 1
-      `).run(newGlobalTotalMined);
-    }
-  });
+    const miningEnabled =
+      newGlobalTotalMined <
+      Number(config.total_mining_allocation);
 
-  transaction();
+    await client.query(
+      `
+      UPDATE mining_config
+      SET
+        total_mined = $1,
+        mining_enabled = $2,
+        updated_at = CURRENT_TIMESTAMP
+      WHERE id = 1
+      `,
+      [
+        newGlobalTotalMined,
+        miningEnabled ? 1 : 0
+      ]
+    );
 
-  const completedSession = db
-    .prepare(`
-      SELECT *
-      FROM mining_sessions
-      WHERE id = ?
-    `)
-    .get(session.id);
-
-  const updatedWallet = db
-    .prepare(`
-      SELECT balance, total_mined
+    const updatedWalletResult = await client.query(
+      `
+      SELECT
+        balance,
+        total_mined
       FROM wallets
-      WHERE user_id = ?
-    `)
-    .get(userId);
+      WHERE user_id = $1
+      `,
+      [userId]
+    );
 
-  const updatedConfig = getMiningConfig();
+    const updatedWallet =
+      updatedWalletResult.rows[0] || null;
 
-  const walletTransaction = db
-    .prepare(`
+    const updatedConfig = await getMiningConfig(client);
+
+    const transactionResult = await client.query(
+      `
       SELECT
         id,
         user_id,
@@ -381,576 +543,813 @@ function settleMiningSession(session, userId) {
         description,
         created_at
       FROM wallet_transactions
-      WHERE mining_session_id = ?
+      WHERE mining_session_id = $1
       ORDER BY id DESC
       LIMIT 1
-    `)
-    .get(session.id);
+      `,
+      [session.id]
+    );
 
-  return {
-    completedSession,
-    updatedWallet,
-    updatedConfig,
-    walletTransaction,
-    calculatedReward: Number(
-      calculatedReward.toFixed(8)
-    ),
-    actualReward: reward,
-    durationSeconds
-  };
+    await client.query("COMMIT");
+
+    return {
+      completedSession,
+      updatedWallet,
+      updatedConfig,
+      walletTransaction:
+        transactionResult.rows[0] || null,
+      calculatedReward: Number(
+        calculatedReward.toFixed(8)
+      ),
+      actualReward: reward,
+      durationSeconds
+    };
+  } catch (error) {
+    try {
+      await client.query("ROLLBACK");
+    } catch {}
+
+    throw error;
+  } finally {
+    client.release();
+  }
 }
 
-function getActiveSession(userId) {
-  return db
-    .prepare(`
-      SELECT *
-      FROM mining_sessions
-      WHERE user_id = ?
-        AND status = 'active'
-      ORDER BY id DESC
-      LIMIT 1
-    `)
-    .get(userId);
-}
 
+// ==========================================
 // START MINING
-router.post("/start", authenticateToken, (req, res) => {
-  try {
-    const userId = req.user.userId;
+// ==========================================
+router.post(
+  "/start",
+  authenticateToken,
+  async (req, res) => {
+    try {
+      const userId = req.user.userId;
 
-    const existingSession = getActiveSession(userId);
+      let existingSession =
+        await getActiveSession(userId);
 
-    if (existingSession) {
-      const startedAt = parseDatabaseDate(
-        existingSession.started_at
-      );
+      if (existingSession) {
+        const startedAt =
+          parseDatabaseDate(
+            existingSession.started_at
+          );
 
-      const ageSeconds = Math.floor(
-        (Date.now() - startedAt.getTime()) / 1000
-      );
-
-      if (ageSeconds >= MAX_SESSION_SECONDS) {
-        settleMiningSession(
-          existingSession,
-          userId
+        const ageSeconds = Math.floor(
+          (
+            Date.now() -
+            startedAt.getTime()
+          ) / 1000
         );
-      } else {
-        return res.status(409).json({
+
+        if (
+          ageSeconds >=
+          MAX_SESSION_SECONDS
+        ) {
+          await settleMiningSession(
+            existingSession,
+            userId
+          );
+
+          existingSession =
+            await getActiveSession(userId);
+        } else {
+          return res.status(409).json({
+            success: false,
+            message: "Mining is already active",
+            session: existingSession,
+            remainingSeconds:
+              MAX_SESSION_SECONDS -
+              ageSeconds
+          });
+        }
+      }
+
+      const config =
+        await getMiningConfig();
+
+      if (
+        Number(config.mining_enabled) !== 1 ||
+        Number(config.total_mined) >=
+          Number(config.total_mining_allocation)
+      ) {
+        return res.status(403).json({
           success: false,
-          message: "Mining is already active",
-          session: existingSession,
-          remainingSeconds:
-            MAX_SESSION_SECONDS - ageSeconds
+          message:
+            "Mining pool has been exhausted",
+          miningEnabled: false,
+          totalMined:
+            Number(config.total_mined),
+          miningAllocation:
+            Number(
+              config.total_mining_allocation
+            )
         });
       }
-    }
 
-    const config = getMiningConfig();
+      const phase =
+        getCurrentMiningPhase(
+          config.total_mined,
+          config
+        );
 
-    if (
-      config.mining_enabled !== 1 ||
-      config.total_mined >= config.total_mining_allocation
-    ) {
-      return res.status(403).json({
-        success: false,
-        message: "Mining pool has been exhausted",
-        miningEnabled: false,
-        totalMined: config.total_mined,
-        miningAllocation:
-          config.total_mining_allocation
+      if (!phase.miningEnabled) {
+        return res.status(403).json({
+          success: false,
+          message:
+            "Mining is disabled because the mining pool is exhausted",
+          miningEnabled: false
+        });
+      }
+
+      // Ensure wallet exists.
+      await db.query(
+        `
+        INSERT INTO wallets
+          (user_id, balance, total_mined)
+        VALUES
+          ($1, 0, 0)
+        ON CONFLICT (user_id) DO NOTHING
+        `,
+        [userId]
+      );
+
+      const sessionResult =
+        await db.query(
+          `
+          INSERT INTO mining_sessions
+          (
+            user_id,
+            status,
+            reward_per_hour,
+            mining_phase
+          )
+          VALUES
+          ($1, 'active', $2, $3)
+          RETURNING *
+          `,
+          [
+            userId,
+            phase.ratePerHour,
+            phase.phase
+          ]
+        );
+
+      const session =
+        sessionResult.rows[0];
+
+      res.status(201).json({
+        success: true,
+        message: "Mining started",
+        maxSessionHours: 12,
+        phase: phase.phase,
+        rewardPerHour:
+          phase.ratePerHour,
+        session
       });
-    }
+    } catch (error) {
+      console.error(
+        "MINING START ERROR:",
+        error
+      );
 
-    const phase = getCurrentMiningPhase(
-      config.total_mined,
-      config
-    );
-
-    if (!phase.miningEnabled) {
-      return res.status(403).json({
+      res.status(500).json({
         success: false,
         message:
-          "Mining is disabled because the mining pool is exhausted",
-        miningEnabled: false
+          error.message ||
+          "Internal server error"
       });
     }
-
-    const wallet = db
-      .prepare(`
-        SELECT id
-        FROM wallets
-        WHERE user_id = ?
-      `)
-      .get(userId);
-
-    if (!wallet) {
-      return res.status(404).json({
-        success: false,
-        message: "Wallet not found"
-      });
-    }
-
-    const result = db
-      .prepare(`
-        INSERT INTO mining_sessions
-        (
-          user_id,
-          status,
-          reward_per_hour,
-          mining_phase
-        )
-        VALUES (?, 'active', ?, ?)
-      `)
-      .run(
-        userId,
-        phase.ratePerHour,
-        phase.phase
-      );
-
-    const session = db
-      .prepare(`
-        SELECT *
-        FROM mining_sessions
-        WHERE id = ?
-      `)
-      .get(result.lastInsertRowid);
-
-    res.status(201).json({
-      success: true,
-      message: "Mining started",
-      maxSessionHours: 12,
-      phase: phase.phase,
-      rewardPerHour: phase.ratePerHour,
-      session
-    });
-
-  } catch (error) {
-    console.error(
-      "MINING START ERROR:",
-      error
-    );
-
-    res.status(500).json({
-      success: false,
-      message: "Internal server error"
-    });
   }
-});
+);
 
+
+// ==========================================
 // STOP MINING
-router.post("/stop", authenticateToken, (req, res) => {
-  try {
-    const userId = req.user.userId;
+// ==========================================
+router.post(
+  "/stop",
+  authenticateToken,
+  async (req, res) => {
+    try {
+      const userId = req.user.userId;
 
-    const session = getActiveSession(userId);
+      const session =
+        await getActiveSession(userId);
 
-    if (!session) {
-      return res.status(404).json({
-        success: false,
-        message: "No active mining session found"
-      });
-    }
+      if (!session) {
+        return res.status(404).json({
+          success: false,
+          message:
+            "No active mining session found"
+        });
+      }
 
-    const result = settleMiningSession(
-      session,
-      userId
-    );
-
-    res.json({
-      success: true,
-      message:
-        result.durationSeconds >= MAX_SESSION_SECONDS
-          ? "Mining session completed after 12 hours"
-          : "Mining stopped",
-      phase: session.mining_phase,
-      rewardPerHour: session.reward_per_hour,
-      maxSessionHours: 12,
-      calculatedReward:
-        result.calculatedReward,
-      actualReward:
-        result.actualReward,
-      totalMined:
-        result.updatedConfig.total_mined,
-      miningAllocation:
-        result.updatedConfig.total_mining_allocation,
-      miningEnabled:
-        result.updatedConfig.mining_enabled === 1,
-      session:
-        result.completedSession,
-      wallet:
-        result.updatedWallet,
-      transaction:
-        result.walletTransaction || null
-    });
-
-  } catch (error) {
-    console.error(
-      "MINING STOP ERROR:",
-      error
-    );
-
-    res.status(500).json({
-      success: false,
-      message: "Internal server error"
-    });
-  }
-});
-
-// MINING STATUS
-router.get("/status", authenticateToken, (req, res) => {
-  try {
-    const userId = req.user.userId;
-
-    let session = getActiveSession(userId);
-
-    let autoCompleted = false;
-    let settlement = null;
-
-    if (session) {
-      const startedAt = parseDatabaseDate(
-        session.started_at
-      );
-
-      const ageSeconds = Math.floor(
-        (Date.now() - startedAt.getTime()) / 1000
-      );
-
-      if (ageSeconds >= MAX_SESSION_SECONDS) {
-        settlement = settleMiningSession(
+      const result =
+        await settleMiningSession(
           session,
           userId
         );
 
-        autoCompleted = true;
-        session = settlement.completedSession;
-      }
-    }
-
-    if (!session) {
-      session = db
-        .prepare(`
-          SELECT id, started_at, stopped_at,
-                 duration_seconds, reward,
-                 status, reward_per_hour,
-                 mining_phase
-          FROM mining_sessions
-          WHERE user_id = ?
-          ORDER BY id DESC
-          LIMIT 1
-        `)
-        .get(userId);
-    }
-
-    const config = getMiningConfig();
-
-    const phase = getCurrentMiningPhase(
-      config.total_mined,
-      config
-    );
-
-    let remainingSessionSeconds = 0;
-
-    if (
-      session &&
-      session.status === "active"
-    ) {
-      const startedAt = parseDatabaseDate(
-        session.started_at
-      );
-
-      const ageSeconds = Math.floor(
-        (Date.now() - startedAt.getTime()) / 1000
-      );
-
-      remainingSessionSeconds = Math.max(
-        0,
-        MAX_SESSION_SECONDS - ageSeconds
-      );
-    }
-
-    res.json({
-      success: true,
-      autoCompleted,
-      mining: session || null,
-      remainingSessionSeconds,
-      maxSessionSeconds: MAX_SESSION_SECONDS,
-      maxSessionHours: 12,
-      settlement: settlement
-        ? {
-            actualReward:
-              settlement.actualReward,
-            calculatedReward:
-              settlement.calculatedReward
-          }
-        : null,
-      pool: {
-        allocation:
-          config.total_mining_allocation,
-        totalMined:
-          Number(config.total_mined.toFixed(8)),
-        remaining:
+      res.json({
+        success: true,
+        message:
+          result.durationSeconds >=
+          MAX_SESSION_SECONDS
+            ? "Mining session completed after 12 hours"
+            : "Mining stopped",
+        phase:
+          session.mining_phase,
+        rewardPerHour:
           Number(
-            Math.max(
-              0,
-              config.total_mining_allocation -
-                config.total_mined
-            ).toFixed(8)
+            session.reward_per_hour
+          ),
+        maxSessionHours: 12,
+        calculatedReward:
+          result.calculatedReward,
+        actualReward:
+          result.actualReward,
+        totalMined:
+          Number(
+            result.updatedConfig.total_mined
+          ),
+        miningAllocation:
+          Number(
+            result.updatedConfig.total_mining_allocation
           ),
         miningEnabled:
-          config.mining_enabled === 1,
-        phase: phase.phase,
-        rewardPerHour: phase.ratePerHour
-      }
-    });
-
-  } catch (error) {
-    console.error(
-      "MINING STATUS ERROR:",
-      error
-    );
-
-    res.status(500).json({
-      success: false,
-      message: "Internal server error"
-    });
-  }
-});
-
-// MINING POOL INFO
-router.get("/pool", (req, res) => {
-  try {
-    const config = getMiningConfig();
-
-    const phase = getCurrentMiningPhase(
-      config.total_mined,
-      config
-    );
-const remaining = Math.max(
-      0,
-      config.total_mining_allocation -
-        config.total_mined
-    );
-
-    const progressPercent = Number(
-      (
-        (config.total_mined /
-          config.total_mining_allocation) *
-        100
-      ).toFixed(8)
-    );
-
-    res.json({
-      success: true,
-      pool: {
-        totalAllocation:
-          config.total_mining_allocation,
-        totalMined:
-          Number(config.total_mined.toFixed(8)),
-        remaining:
-          Number(remaining.toFixed(8)),
-        progressPercent,
-        phase: phase.phase,
-        rewardPerHour: phase.ratePerHour,
-        miningEnabled:
-          config.mining_enabled === 1
-      }
-    });
-
-  } catch (error) {
-    console.error(
-      "MINING POOL ERROR:",
-      error
-    );
-
-    res.status(500).json({
-      success: false,
-      message: "Internal server error"
-    });
-  }
-});
-
-// MINING DASHBOARD
-router.get("/dashboard", authenticateToken, (req, res) => {
-  try {
-    const userId = req.user.userId;
-
-    let activeSession =
-      getActiveSession(userId);
-
-    let autoCompleted = false;
-
-    if (activeSession) {
-      const startedAt = parseDatabaseDate(
-        activeSession.started_at
+          Number(
+            result.updatedConfig.mining_enabled
+          ) === 1,
+        session:
+          result.completedSession,
+        wallet:
+          result.updatedWallet,
+        transaction:
+          result.walletTransaction || null
+      });
+    } catch (error) {
+      console.error(
+        "MINING STOP ERROR:",
+        error
       );
 
-      const ageSeconds = Math.floor(
-        (Date.now() - startedAt.getTime()) / 1000
-      );
-
-      if (ageSeconds >= MAX_SESSION_SECONDS) {
-        settleMiningSession(
-          activeSession,
-          userId
-        );
-
-        autoCompleted = true;
-        activeSession = null;
-      }
-    }
-
-    const wallet = db
-      .prepare(`
-        SELECT balance, total_mined
-        FROM wallets
-        WHERE user_id = ?
-      `)
-      .get(userId);
-
-    if (!wallet) {
-      return res.status(404).json({
+      res.status(500).json({
         success: false,
-        message: "Wallet not found"
+        message:
+          error.message ||
+          "Internal server error"
       });
     }
-
-    const config = getMiningConfig();
-
-    const phase = getCurrentMiningPhase(
-      config.total_mined,
-      config
-    );
-
-    // ==========================================
-    // MINING STATISTICS
-    // ==========================================
-    const statistics = db.prepare(`
-      SELECT
-        COALESCE(SUM(
-          CASE
-            WHEN date(stopped_at) = date('now', 'localtime')
-            THEN reward
-            ELSE 0
-          END
-        ), 0) AS todayEarned,
-
-        COALESCE(SUM(
-          CASE
-            WHEN date(stopped_at) >= date('now', 'localtime', '-6 days')
-            THEN reward
-            ELSE 0
-          END
-        ), 0) AS weekEarned,
-
-        COALESCE(SUM(
-          CASE
-            WHEN strftime('%Y-%m', stopped_at) =
-                 strftime('%Y-%m', 'now', 'localtime')
-            THEN reward
-            ELSE 0
-          END
-        ), 0) AS monthEarned
-
-      FROM mining_sessions
-      WHERE user_id = ?
-        AND status = 'completed'
-        AND stopped_at IS NOT NULL
-    `).get(userId);
-
-    let remainingSessionSeconds = 0;
-
-    if (activeSession) {
-      const startedAt = parseDatabaseDate(
-        activeSession.started_at
-      );
-
-      const ageSeconds = Math.floor(
-        (Date.now() - startedAt.getTime()) / 1000
-      );
-
-      remainingSessionSeconds = Math.max(
-        0,
-        MAX_SESSION_SECONDS - ageSeconds
-      );
-    }
-
-    const remaining = Math.max(
-      0,
-      config.total_mining_allocation -
-        config.total_mined
-    );
-
-    const progressPercent = Number(
-      (
-        (config.total_mined /
-          config.total_mining_allocation) *
-        100
-      ).toFixed(8)
-    );
-
-    res.json({
-      success: true,
-      autoCompleted,
-      user: {
-        userId,
-        walletBalance:
-          Number(wallet.balance.toFixed(8)),
-        totalMined:
-          Number(wallet.total_mined.toFixed(8)),
-        miningActive:
-          !!activeSession
-      },
-      session:
-        activeSession || null,
-      statistics: {
-        todayEarned: Number(
-          Number(statistics.todayEarned || 0).toFixed(8)
-        ),
-        weekEarned: Number(
-          Number(statistics.weekEarned || 0).toFixed(8)
-        ),
-        monthEarned: Number(
-          Number(statistics.monthEarned || 0).toFixed(8)
-        )
-      },
-      mining: {
-        phase: phase.phase,
-        rewardPerHour: activeSession
-          ? activeSession.reward_per_hour
-          : phase.ratePerHour,
-        miningEnabled:
-          config.mining_enabled === 1,
-        maxSessionHours: 12,
-        remainingSessionSeconds
-      },
-      pool: {
-        totalAllocation:
-          config.total_mining_allocation,
-        totalMined:
-          Number(config.total_mined.toFixed(8)),
-        remaining:
-          Number(remaining.toFixed(8)),
-        progressPercent
-      }
-    });
-
-  } catch (error) {
-    console.error(
-      "MINING DASHBOARD ERROR:",
-      error
-    );
-
-    res.status(500).json({
-      success: false,
-      message: "Internal server error"
-    });
   }
-});
+);
+
+
+// ==========================================
+// MINING STATUS
+// ==========================================
+router.get(
+  "/status",
+  authenticateToken,
+  async (req, res) => {
+    try {
+      const userId = req.user.userId;
+
+      let session =
+        await getActiveSession(userId);
+
+      let autoCompleted = false;
+      let settlement = null;
+
+      if (session) {
+        const startedAt =
+          parseDatabaseDate(
+            session.started_at
+          );
+
+        const ageSeconds = Math.floor(
+          (
+            Date.now() -
+            startedAt.getTime()
+          ) / 1000
+        );
+
+        if (
+          ageSeconds >=
+          MAX_SESSION_SECONDS
+        ) {
+          settlement =
+            await settleMiningSession(
+              session,
+              userId
+            );
+
+          autoCompleted = true;
+          session =
+            settlement.completedSession;
+        }
+      }
+
+      if (!session) {
+        const latestResult =
+          await db.query(
+            `
+            SELECT
+              id,
+              started_at,
+              stopped_at,
+              duration_seconds,
+              reward,
+              status,
+              reward_per_hour,
+              mining_phase
+            FROM mining_sessions
+            WHERE user_id = $1
+            ORDER BY id DESC
+            LIMIT 1
+            `,
+            [userId]
+          );
+
+        session =
+          latestResult.rows[0] || null;
+      }
+
+      const config =
+        await getMiningConfig();
+
+      const phase =
+        getCurrentMiningPhase(
+          config.total_mined,
+          config
+        );
+
+      let remainingSessionSeconds = 0;
+
+      if (
+        session &&
+        session.status === "active"
+      ) {
+        const startedAt =
+          parseDatabaseDate(
+            session.started_at
+          );
+
+        const ageSeconds = Math.floor(
+          (
+            Date.now() -
+            startedAt.getTime()
+          ) / 1000
+        );
+
+        remainingSessionSeconds =
+          Math.max(
+            0,
+            MAX_SESSION_SECONDS -
+              ageSeconds
+          );
+      }
+
+      res.json({
+        success: true,
+        autoCompleted,
+        mining: session || null,
+        remainingSessionSeconds,
+        maxSessionSeconds:
+          MAX_SESSION_SECONDS,
+        maxSessionHours: 12,
+        settlement:
+          settlement
+            ? {
+                actualReward:
+                  settlement.actualReward,
+                calculatedReward:
+                  settlement.calculatedReward
+              }
+            : null,
+        pool: {
+          allocation:
+            Number(
+              config.total_mining_allocation
+            ),
+          totalMined:
+            Number(
+              Number(
+                config.total_mined
+              ).toFixed(8)
+            ),
+          remaining:
+            Number(
+              Math.max(
+                0,
+                Number(
+                  config.total_mining_allocation
+                ) -
+                Number(
+                  config.total_mined
+                )
+              ).toFixed(8)
+            ),
+          miningEnabled:
+            Number(
+              config.mining_enabled
+            ) === 1,
+          phase:
+            phase.phase,
+          rewardPerHour:
+            phase.ratePerHour
+        }
+      });
+    } catch (error) {
+      console.error(
+        "MINING STATUS ERROR:",
+        error
+      );
+
+      res.status(500).json({
+        success: false,
+        message:
+          error.message ||
+          "Internal server error"
+      });
+    }
+  }
+);
+
+
+// ==========================================
+// MINING POOL INFO
+// ==========================================
+router.get(
+  "/pool",
+  async (req, res) => {
+    try {
+      const config =
+        await getMiningConfig();
+
+      const phase =
+        getCurrentMiningPhase(
+          config.total_mined,
+          config
+        );
+
+      const totalAllocation =
+        Number(
+          config.total_mining_allocation
+        );
+
+      const totalMined =
+        Number(
+          config.total_mined
+        );
+
+      const remaining =
+        Math.max(
+          0,
+          totalAllocation -
+            totalMined
+        );
+
+      const progressPercent =
+        totalAllocation > 0
+          ? Number(
+              (
+                (
+                  totalMined /
+                  totalAllocation
+                ) *
+                100
+              ).toFixed(8)
+            )
+          : 0;
+
+      res.json({
+        success: true,
+        pool: {
+          totalAllocation,
+          totalMined:
+            Number(
+              totalMined.toFixed(8)
+            ),
+          remaining:
+            Number(
+              remaining.toFixed(8)
+            ),
+          progressPercent,
+          phase:
+            phase.phase,
+          rewardPerHour:
+            phase.ratePerHour,
+          miningEnabled:
+            Number(
+              config.mining_enabled
+            ) === 1
+        }
+      });
+    } catch (error) {
+      console.error(
+        "MINING POOL ERROR:",
+        error
+      );
+
+      res.status(500).json({
+        success: false,
+        message:
+          error.message ||
+          "Internal server error"
+      });
+    }
+  }
+);
+
+
+// ==========================================
+// MINING DASHBOARD
+// ==========================================
+router.get(
+  "/dashboard",
+  authenticateToken,
+  async (req, res) => {
+    try {
+      const userId = req.user.userId;
+
+      let activeSession =
+        await getActiveSession(userId);
+
+      let autoCompleted = false;
+
+      if (activeSession) {
+        const startedAt =
+          parseDatabaseDate(
+            activeSession.started_at
+          );
+
+        const ageSeconds = Math.floor(
+          (
+            Date.now() -
+            startedAt.getTime()
+          ) / 1000
+        );
+
+        if (
+          ageSeconds >=
+          MAX_SESSION_SECONDS
+        ) {
+          await settleMiningSession(
+            activeSession,
+            userId
+          );
+
+          autoCompleted = true;
+          activeSession = null;
+        }
+      }
+
+      // Automatically create wallet for valid users.
+      await db.query(
+        `
+        INSERT INTO wallets
+          (user_id, balance, total_mined)
+        VALUES
+          ($1, 0, 0)
+        ON CONFLICT (user_id) DO NOTHING
+        `,
+        [userId]
+      );
+
+      const walletResult =
+        await db.query(
+          `
+          SELECT
+            balance,
+            total_mined
+          FROM wallets
+          WHERE user_id = $1
+          LIMIT 1
+          `,
+          [userId]
+        );
+
+      const wallet =
+        walletResult.rows[0] || null;
+
+      if (!wallet) {
+        return res.status(404).json({
+          success: false,
+          message: "Wallet not found"
+        });
+      }
+
+      const config =
+        await getMiningConfig();
+
+      const phase =
+        getCurrentMiningPhase(
+          config.total_mined,
+          config
+        );
+
+      // ==========================================
+      // MINING STATISTICS
+      // ==========================================
+      const statisticsResult =
+        await db.query(
+          `
+          SELECT
+            COALESCE(
+              SUM(
+                CASE
+                  WHEN stopped_at::date =
+                       CURRENT_DATE
+                  THEN reward
+                  ELSE 0
+                END
+              ),
+              0
+            ) AS "todayEarned",
+
+            COALESCE(
+              SUM(
+                CASE
+                  WHEN stopped_at::date >=
+                       CURRENT_DATE - INTERVAL '6 days'
+                  THEN reward
+                  ELSE 0
+                END
+              ),
+              0
+            ) AS "weekEarned",
+
+            COALESCE(
+              SUM(
+                CASE
+                  WHEN DATE_TRUNC(
+                    'month',
+                    stopped_at
+                  ) =
+                  DATE_TRUNC(
+                    'month',
+                    CURRENT_TIMESTAMP
+                  )
+                  THEN reward
+                  ELSE 0
+                END
+              ),
+              0
+            ) AS "monthEarned"
+
+          FROM mining_sessions
+          WHERE user_id = $1
+            AND status = 'completed'
+            AND stopped_at IS NOT NULL
+          `,
+          [userId]
+        );
+
+      const statistics =
+        statisticsResult.rows[0] || {};
+
+      let remainingSessionSeconds = 0;
+
+      if (
+        activeSession &&
+        activeSession.status === "active"
+      ) {
+        const startedAt =
+          parseDatabaseDate(
+            activeSession.started_at
+          );
+
+        const ageSeconds = Math.floor(
+          (
+            Date.now() -
+            startedAt.getTime()
+          ) / 1000
+        );
+
+        remainingSessionSeconds =
+          Math.max(
+            0,
+            MAX_SESSION_SECONDS -
+              ageSeconds
+          );
+      }
+
+      const totalAllocation =
+        Number(
+          config.total_mining_allocation
+        );
+
+      const totalMined =
+        Number(
+          config.total_mined
+        );
+
+      const remaining =
+        Math.max(
+          0,
+          totalAllocation -
+            totalMined
+        );
+
+      const progressPercent =
+        totalAllocation > 0
+          ? Number(
+              (
+                (
+                  totalMined /
+                  totalAllocation
+                ) *
+                100
+              ).toFixed(8)
+            )
+          : 0;
+
+      res.json({
+        success: true,
+        autoCompleted,
+        user: {
+          userId,
+          walletBalance:
+            Number(
+              Number(
+                wallet.balance
+              ).toFixed(8)
+            ),
+          totalMined:
+            Number(
+              Number(
+                wallet.total_mined
+              ).toFixed(8)
+            ),
+          miningActive:
+            !!activeSession
+        },
+        session:
+          activeSession || null,
+        statistics: {
+          todayEarned:
+            Number(
+              Number(
+                statistics.todayEarned || 0
+              ).toFixed(8)
+            ),
+          weekEarned:
+            Number(
+              Number(
+                statistics.weekEarned || 0
+              ).toFixed(8)
+            ),
+          monthEarned:
+            Number(
+              Number(
+                statistics.monthEarned || 0
+              ).toFixed(8)
+            )
+        },
+        mining: {
+          phase:
+            phase.phase,
+          rewardPerHour:
+            activeSession
+              ? Number(
+                  activeSession.reward_per_hour
+                )
+              : phase.ratePerHour,
+          miningEnabled:
+            Number(
+              config.mining_enabled
+            ) === 1,
+          maxSessionHours: 12,
+          remainingSessionSeconds
+        },
+        pool: {
+          totalAllocation,
+          totalMined:
+            Number(
+              totalMined.toFixed(8)
+            ),
+          remaining:
+            Number(
+              remaining.toFixed(8)
+            ),
+          progressPercent
+        }
+      });
+    } catch (error) {
+      console.error(
+        "MINING DASHBOARD ERROR:",
+        error
+      );
+
+      res.status(500).json({
+        success: false,
+        message:
+          error.message ||
+          "Internal server error"
+      });
+    }
+  }
+);
 
 module.exports = router;
-
-
-
-
-
-
