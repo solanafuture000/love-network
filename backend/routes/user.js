@@ -766,7 +766,7 @@ router.get("/referrals", authenticateToken, async (req, res) => {
       success: true,
       referralCode: user.referral_code || null,
       referralLink: user.referral_code
-        ? `http://localhost:5174/register?ref=${encodeURIComponent(user.referral_code)}`
+        ? `https://lovenetwork-77f6a.web.app/register?ref=${encodeURIComponent(user.referral_code)}`
         : null,
       totalReferrals: referrals.length,
       totalRewards: Number(totalRewards.toFixed(8)),
@@ -916,3 +916,4 @@ router.delete("/account", authenticateToken, async (req, res) => {
 ========================================================= */
 
 module.exports = router;
+
