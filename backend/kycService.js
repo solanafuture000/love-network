@@ -1,53 +1,79 @@
-const db = require("./database");
+﻿const db = require("./database-pg");
 
 const KYC_MINING_SESSIONS = 50;
 
-function updateKycEligibility(userId) {
-  const user = db
-    .prepare(`
+async function updateKycEligibility(userId) {
+  const userResult = await db.query(
+    `
       SELECT id, username, email
       FROM users
-      WHERE id = ?
-    `)
-    .get(userId);
+      WHERE id = $1
+    `,
+    [userId]
+  );
+
+  const user = userResult.rows[0] || null;
 
   console.log("KYC DEBUG:", {
     userId,
     userExists: !!user,
     user: user || null
   });
-  const result = db
-    .prepare(`
-      SELECT COUNT(*) AS completed_sessions
+
+  if (!user) {
+    console.warn("KYC: user not found in PostgreSQL:", userId);
+    return "NOT_ELIGIBLE";
+  }
+
+  const sessionsResult = await db.query(
+    `
+      SELECT COUNT(*)::int AS completed_sessions
       FROM mining_sessions
-      WHERE user_id = ?
+      WHERE user_id = $1
         AND status = 'completed'
-    `)
-    .get(userId);
+    `,
+    [userId]
+  );
 
-  const completedSessions = result.completed_sessions;
+  const completedSessions =
+    Number(sessionsResult.rows[0]?.completed_sessions || 0);
 
-  let kyc = db
-    .prepare(`
+  let kycResult = await db.query(
+    `
       SELECT id, status
       FROM user_kyc
-      WHERE user_id = ?
-    `)
-    .get(userId);
+      WHERE user_id = $1
+      LIMIT 1
+    `,
+    [userId]
+  );
+
+  let kyc = kycResult.rows[0] || null;
 
   if (!kyc) {
-    db.prepare(`
-      INSERT INTO user_kyc (user_id, status)
-      VALUES (?, 'NOT_ELIGIBLE')
-    `).run(userId);
+    await db.query(
+      `
+        INSERT INTO user_kyc (user_id, status)
+        VALUES ($1, 'NOT_ELIGIBLE')
+      `,
+      [userId]
+    );
 
-    kyc = db
-      .prepare(`
+    kycResult = await db.query(
+      `
         SELECT id, status
         FROM user_kyc
-        WHERE user_id = ?
-      `)
-      .get(userId);
+        WHERE user_id = $1
+        LIMIT 1
+      `,
+      [userId]
+    );
+
+    kyc = kycResult.rows[0] || null;
+  }
+
+  if (!kyc) {
+    throw new Error("Unable to create or load KYC record");
   }
 
   // Pending and approved KYC must never be changed automatically.
@@ -58,13 +84,16 @@ function updateKycEligibility(userId) {
   // User is not eligible until the required sessions are completed.
   if (completedSessions < KYC_MINING_SESSIONS) {
     if (kyc.status === "ELIGIBLE") {
-      db.prepare(`
-        UPDATE user_kyc
-        SET status = 'NOT_ELIGIBLE',
-            eligible_at = NULL,
-            updated_at = CURRENT_TIMESTAMP
-        WHERE user_id = ?
-      `).run(userId);
+      await db.query(
+        `
+          UPDATE user_kyc
+          SET status = 'NOT_ELIGIBLE',
+              eligible_at = NULL,
+              updated_at = CURRENT_TIMESTAMP
+          WHERE user_id = $1
+        `,
+        [userId]
+      );
     }
 
     return "NOT_ELIGIBLE";
@@ -72,13 +101,16 @@ function updateKycEligibility(userId) {
 
   // User becomes eligible after completing 50 sessions.
   if (kyc.status === "NOT_ELIGIBLE") {
-    db.prepare(`
-      UPDATE user_kyc
-      SET status = 'ELIGIBLE',
-          eligible_at = CURRENT_TIMESTAMP,
-          updated_at = CURRENT_TIMESTAMP
-      WHERE user_id = ?
-    `).run(userId);
+    await db.query(
+      `
+        UPDATE user_kyc
+        SET status = 'ELIGIBLE',
+            eligible_at = CURRENT_TIMESTAMP,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE user_id = $1
+      `,
+      [userId]
+    );
 
     return "ELIGIBLE";
   }
@@ -90,4 +122,3 @@ module.exports = {
   KYC_MINING_SESSIONS,
   updateKycEligibility
 };
-
