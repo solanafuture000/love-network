@@ -1,3 +1,4 @@
+
 const API_BASE_URL = "https://love-network.onrender.com/api";
 
 async function request(endpoint, options = {}) {
@@ -20,13 +21,19 @@ async function request(endpoint, options = {}) {
   const data = await response.json().catch(() => ({}));
 
   if (!response.ok) {
-    throw new Error(data.message || `Request failed: ${response.status}`);
+    throw new Error(
+      data.message || `Request failed: ${response.status}`
+    );
   }
 
   return data;
 }
 
 export const api = {
+  // --------------------------------------------------
+  // AUTH
+  // --------------------------------------------------
+
   register(data) {
     return request("/auth/register", {
       method: "POST",
@@ -48,7 +55,11 @@ export const api = {
     });
   },
 
-  verifyForgotPassword(challengeToken, otp, newPassword) {
+  verifyForgotPassword(
+    challengeToken,
+    otp,
+    newPassword
+  ) {
     return request("/auth/forgot-password/verify", {
       method: "POST",
       body: JSON.stringify({
@@ -58,6 +69,11 @@ export const api = {
       })
     });
   },
+
+
+  // --------------------------------------------------
+  // USER
+  // --------------------------------------------------
 
   getProfile() {
     return request("/user/profile");
@@ -70,40 +86,77 @@ export const api = {
     });
   },
 
-  changePassword(currentPassword, newPassword) {
+  changePassword(
+    currentPassword,
+    newPassword
+  ) {
     return request("/user/change-password", {
       method: "PUT",
-      body: JSON.stringify({ currentPassword, newPassword })
+      body: JSON.stringify({
+        currentPassword,
+        newPassword
+      })
     });
   },
 
   deleteAccount(currentPassword) {
     return request("/user/account", {
       method: "DELETE",
-      body: JSON.stringify({ currentPassword })
+      body: JSON.stringify({
+        currentPassword
+      })
     });
   },
 
-  changeEmail(newEmail, currentPassword) {
+  changeEmail(
+    newEmail,
+    currentPassword
+  ) {
     return request("/user/change-email", {
       method: "PUT",
-      body: JSON.stringify({ newEmail, currentPassword })
+      body: JSON.stringify({
+        newEmail,
+        currentPassword
+      })
     });
   },
 
-  requestEmailChangeOtp(newEmail, currentPassword) {
-    return request("/user/change-email/request", {
-      method: "PUT",
-      body: JSON.stringify({ newEmail, currentPassword })
-    });
+  requestEmailChangeOtp(
+    newEmail,
+    currentPassword
+  ) {
+    return request(
+      "/user/change-email/request",
+      {
+        method: "PUT",
+        body: JSON.stringify({
+          newEmail,
+          currentPassword
+        })
+      }
+    );
   },
 
-  verifyEmailChangeOtp(newEmail, otp) {
-    return request("/user/change-email/verify", {
-      method: "PUT",
-      body: JSON.stringify({ newEmail, otp })
-    });
+  verifyEmailChangeOtp(
+    newEmail,
+    otp
+  ) {
+    return request(
+      "/user/change-email/verify",
+      {
+        method: "PUT",
+        body: JSON.stringify({
+          newEmail,
+          otp
+        })
+      }
+    );
   },
+
+
+  // --------------------------------------------------
+  // MINING
+  // --------------------------------------------------
 
   getMiningDashboard() {
     return request("/mining/dashboard");
@@ -114,16 +167,25 @@ export const api = {
   },
 
   startMining() {
-    return request("/mining/start", { method: "POST" });
+    return request("/mining/start", {
+      method: "POST"
+    });
   },
 
   stopMining() {
-    return request("/mining/stop", { method: "POST" });
+    return request("/mining/stop", {
+      method: "POST"
+    });
   },
 
   getMiningPool() {
     return request("/mining/pool");
   },
+
+
+  // --------------------------------------------------
+  // HISTORY
+  // --------------------------------------------------
 
   getMiningHistory() {
     return request("/history/mining");
@@ -133,11 +195,20 @@ export const api = {
     return request("/history/transactions");
   },
 
+
+  // --------------------------------------------------
+  // REFERRALS
+  // --------------------------------------------------
+
   getReferrals() {
     return request("/user/referrals");
   },
 
+
+  // --------------------------------------------------
   // KYC
+  // --------------------------------------------------
+
   getKycStatus() {
     return request("/kyc/status");
   },
@@ -148,27 +219,62 @@ export const api = {
     });
   },
 
-  // Wallet
+
+  // --------------------------------------------------
+  // WALLET
+  // --------------------------------------------------
+
+  // Current/main wallet
   getWallet() {
     return request("/wallet");
   },
 
+  // All wallets belonging to current user
+  getWallets() {
+    return request("/wallet/list");
+  },
+
+  // Create a new LOVE wallet
+  createWallet(
+    walletName = "LOVE Wallet"
+  ) {
+    return request("/wallet/create", {
+      method: "POST",
+      body: JSON.stringify({
+        walletName
+      })
+    });
+  },
+
+
+  // --------------------------------------------------
   // 2FA
+  // --------------------------------------------------
+
   get2FAStatus() {
-    return request("/auth/otp/2fa/status");
+    return request(
+      "/auth/otp/2fa/status"
+    );
   },
 
   send2FAOtp() {
-    return request("/auth/otp/2fa/send", {
-      method: "POST"
-    });
+    return request(
+      "/auth/otp/2fa/send",
+      {
+        method: "POST"
+      }
+    );
   },
 
   verify2FAOtp(otp) {
-    return request("/auth/otp/2fa/verify", {
-      method: "POST",
-      body: JSON.stringify({ otp })
-    });
+    return request(
+      "/auth/otp/2fa/verify",
+      {
+        method: "POST",
+        body: JSON.stringify({
+          otp
+        })
+      }
+    );
   }
 };
-
