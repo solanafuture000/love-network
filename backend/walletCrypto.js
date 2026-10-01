@@ -45,6 +45,78 @@ function generateWallet() {
   };
 }
 
+/*
+|--------------------------------------------------------------------------
+| DERIVE WALLET FROM PRIVATE KEY
+|--------------------------------------------------------------------------
+| Converts the user's PKCS8 Ed25519 private key into the
+| corresponding public key and LOVE address.
+*/
+function deriveWalletFromPrivateKey(privateKeyBase64) {
+  if (
+    typeof privateKeyBase64 !== "string" ||
+    !privateKeyBase64.trim()
+  ) {
+    throw new Error("Private key is required");
+  }
+
+  const normalizedPrivateKey = privateKeyBase64.trim();
+
+  let privateKeyDer;
+
+  try {
+    privateKeyDer = Buffer.from(
+      normalizedPrivateKey,
+      "base64"
+    );
+  } catch {
+    throw new Error("Invalid private key");
+  }
+
+  if (!privateKeyDer.length) {
+    throw new Error("Invalid private key");
+  }
+
+  let privateKeyObject;
+
+  try {
+    privateKeyObject = crypto.createPrivateKey({
+      key: privateKeyDer,
+      format: "der",
+      type: "pkcs8"
+    });
+  } catch {
+    throw new Error("Invalid private key");
+  }
+
+  if (privateKeyObject.asymmetricKeyType !== "ed25519") {
+    throw new Error("Invalid wallet private key");
+  }
+
+  const publicKey = crypto.createPublicKey(
+    privateKeyObject
+  ).export({
+    type: "spki",
+    format: "der"
+  });
+
+  const publicKeyBase64 = publicKey.toString("base64url");
+
+  const addressHash = crypto
+    .createHash("sha256")
+    .update(publicKey)
+    .digest("hex")
+    .toUpperCase();
+
+  const publicAddress =
+    `LOVE${addressHash.slice(0, 40)}`;
+
+  return {
+    publicKey: publicKeyBase64,
+    publicAddress
+  };
+}
+
 function encryptPrivateKey(privateKeyBase64) {
   const key = getEncryptionKey();
 
@@ -52,7 +124,9 @@ function encryptPrivateKey(privateKeyBase64) {
   const cipher = crypto.createCipheriv(ALGORITHM, key, iv);
 
   const encrypted = Buffer.concat([
-    cipher.update(Buffer.from(privateKeyBase64, "base64")),
+    cipher.update(
+      Buffer.from(privateKeyBase64, "base64")
+    ),
     cipher.final()
   ]);
 
@@ -78,7 +152,12 @@ function decryptPrivateKey(encryptedValue) {
   const authTag = Buffer.from(parts[1], "base64");
   const encrypted = Buffer.from(parts[2], "base64");
 
-  const decipher = crypto.createDecipheriv(ALGORITHM, key, iv);
+  const decipher = crypto.createDecipheriv(
+    ALGORITHM,
+    key,
+    iv
+  );
+
   decipher.setAuthTag(authTag);
 
   const decrypted = Buffer.concat([
@@ -91,6 +170,7 @@ function decryptPrivateKey(encryptedValue) {
 
 module.exports = {
   generateWallet,
+  deriveWalletFromPrivateKey,
   encryptPrivateKey,
   decryptPrivateKey
 };

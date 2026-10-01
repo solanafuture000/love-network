@@ -1,9 +1,10 @@
-
 const express = require("express");
+const crypto = require("crypto");
 const db = require("../database-pg");
 const authenticateToken = require("../middleware/auth");
 const {
   generateWallet,
+  deriveWalletFromPrivateKey,
   encryptPrivateKey
 } = require("../walletCrypto");
 
@@ -11,7 +12,7 @@ const router = express.Router();
 
 /*
 |--------------------------------------------------------------------------
-| GET CURRENT WALLET
+| GET CURRENT LEGACY WALLET
 |--------------------------------------------------------------------------
 | Existing wallet endpoint preserved.
 */
@@ -95,6 +96,11 @@ router.get("/", authenticateToken, async (req, res) => {
         balance_after,
         mining_session_id,
         description,
+        wallet_id,
+        counterparty_wallet_id,
+        transfer_reference,
+        fee,
+        status,
         created_at
       FROM wallet_transactions
       WHERE user_id = $1
@@ -124,8 +130,7 @@ router.get("/", authenticateToken, async (req, res) => {
 |--------------------------------------------------------------------------
 | GET MY WALLETS
 |--------------------------------------------------------------------------
-| Returns all wallets belonging to the logged-in user.
-| Private keys are NEVER returned here.
+| Private keys are NEVER returned.
 */
 router.get("/list", authenticateToken, async (req, res) => {
   try {
@@ -169,13 +174,6 @@ router.get("/list", authenticateToken, async (req, res) => {
 |--------------------------------------------------------------------------
 | CREATE / ADD NEW WALLET
 |--------------------------------------------------------------------------
-| Generates:
-| - Public key
-| - LOVE address
-| - Private key
-|
-| Private key is encrypted before being stored.
-| The plain private key is returned ONLY at creation time.
 */
 router.post("/create", authenticateToken, async (req, res) => {
   try {
@@ -292,10 +290,385 @@ router.post("/create", authenticateToken, async (req, res) => {
 
 /*
 |--------------------------------------------------------------------------
+| LOVE → LOVE TRANSFER
+|--------------------------------------------------------------------------
+| Direct wallet-to-wallet transfer.
+|
+| Sender:
+|   balance decreases
+|
+| Receiver:
+|   balance increases
+|
+| No admin approval.
+| PostgreSQL transaction + row locks protect the balances.
+*/
+router.post("/transfer", authenticateToken, async (req, res) => {
+  const senderUserId = Number(req.user.userId);
+
+  try {
+    const receiverAddress =
+      typeof req.body.receiverAddress === "string"
+        ? req.body.receiverAddress.trim().toUpperCase()
+        : "";
+
+    const amount = Number(req.body.amount);
+
+    if (!receiverAddress) {
+      return res.status(400).json({
+        success: false,
+        message: "Receiver wallet address is required."
+      });
+    }
+
+    if (
+      !receiverAddress.startsWith("LOVE") ||
+      receiverAddress.length !== 44
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid LOVE wallet address."
+      });
+    }
+
+    if (!Number.isFinite(amount) || amount <= 0) {
+      return res.status(400).json({
+        success: false,
+        message: "Enter a valid LOVE amount."
+      });
+    }
+
+    if (amount > 100000000) {
+      return res.status(400).json({
+        success: false,
+        message: "Transfer amount is too large."
+      });
+    }
+
+    const client = await db.pool.connect();
+
+    try {
+      await client.query("BEGIN");
+
+      /*
+      |--------------------------------------------------------------------------
+      | Find sender default wallet
+      |--------------------------------------------------------------------------
+      */
+      const senderResult = await client.query(
+        `
+        SELECT
+          id,
+          user_id,
+          wallet_name,
+          public_address,
+          balance
+        FROM user_wallets
+        WHERE user_id = $1
+          AND is_default = TRUE
+        LIMIT 1
+        `,
+        [senderUserId]
+      );
+
+      const senderWallet = senderResult.rows[0];
+
+      if (!senderWallet) {
+        await client.query("ROLLBACK");
+
+        return res.status(404).json({
+          success: false,
+          message: "Sender default wallet not found."
+        });
+      }
+
+      /*
+      |--------------------------------------------------------------------------
+      | Find receiver wallet
+      |--------------------------------------------------------------------------
+      */
+      const receiverResult = await client.query(
+        `
+        SELECT
+          id,
+          user_id,
+          wallet_name,
+          public_address,
+          balance
+        FROM user_wallets
+        WHERE public_address = $1
+        LIMIT 1
+        `,
+        [receiverAddress]
+      );
+
+      const receiverWallet = receiverResult.rows[0];
+
+      if (!receiverWallet) {
+        await client.query("ROLLBACK");
+
+        return res.status(404).json({
+          success: false,
+          message: "Receiver LOVE wallet not found."
+        });
+      }
+
+      /*
+      |--------------------------------------------------------------------------
+      | Prevent self transfer
+      |--------------------------------------------------------------------------
+      */
+      if (
+        Number(receiverWallet.id) ===
+        Number(senderWallet.id)
+      ) {
+        await client.query("ROLLBACK");
+
+        return res.status(400).json({
+          success: false,
+          message: "You cannot transfer LOVE to the same wallet."
+        });
+      }
+
+      /*
+      |--------------------------------------------------------------------------
+      | Lock both wallet rows in deterministic order
+      |--------------------------------------------------------------------------
+      | This reduces deadlock risk when two transfers happen simultaneously.
+      */
+      const firstWalletId = Math.min(
+        Number(senderWallet.id),
+        Number(receiverWallet.id)
+      );
+
+      const secondWalletId = Math.max(
+        Number(senderWallet.id),
+        Number(receiverWallet.id)
+      );
+
+      const lockedResult = await client.query(
+        `
+        SELECT
+          id,
+          user_id,
+          wallet_name,
+          public_address,
+          balance
+        FROM user_wallets
+        WHERE id IN ($1, $2)
+        ORDER BY id
+        FOR UPDATE
+        `,
+        [firstWalletId, secondWalletId]
+      );
+
+      const lockedWallets = lockedResult.rows;
+
+      const lockedSender = lockedWallets.find(
+        (wallet) =>
+          Number(wallet.id) === Number(senderWallet.id)
+      );
+
+      const lockedReceiver = lockedWallets.find(
+        (wallet) =>
+          Number(wallet.id) === Number(receiverWallet.id)
+      );
+
+      if (!lockedSender || !lockedReceiver) {
+        await client.query("ROLLBACK");
+
+        return res.status(500).json({
+          success: false,
+          message: "Unable to lock transfer wallets."
+        });
+      }
+
+      const senderBalance = Number(lockedSender.balance);
+      const receiverBalance = Number(lockedReceiver.balance);
+
+      /*
+      |--------------------------------------------------------------------------
+      | Balance check
+      |--------------------------------------------------------------------------
+      */
+      if (amount > senderBalance) {
+        await client.query("ROLLBACK");
+
+        return res.status(400).json({
+          success: false,
+          message: "Insufficient LOVE balance.",
+          balance: senderBalance
+        });
+      }
+
+      const senderNewBalance =
+        senderBalance - amount;
+
+      const receiverNewBalance =
+        receiverBalance + amount;
+
+      /*
+      |--------------------------------------------------------------------------
+      | Update sender
+      |--------------------------------------------------------------------------
+      */
+      await client.query(
+        `
+        UPDATE user_wallets
+        SET
+          balance = $1,
+          updated_at = CURRENT_TIMESTAMP
+        WHERE id = $2
+        `,
+        [
+          senderNewBalance,
+          senderWallet.id
+        ]
+      );
+
+      /*
+      |--------------------------------------------------------------------------
+      | Update receiver
+      |--------------------------------------------------------------------------
+      */
+      await client.query(
+        `
+        UPDATE user_wallets
+        SET
+          balance = $1,
+          updated_at = CURRENT_TIMESTAMP
+        WHERE id = $2
+        `,
+        [
+          receiverNewBalance,
+          receiverWallet.id
+        ]
+      );
+
+      /*
+      |--------------------------------------------------------------------------
+      | Unique transfer reference
+      |--------------------------------------------------------------------------
+      */
+      const transferReference =
+        `LOVE-${Date.now()}-${crypto.randomBytes(6).toString("hex").toUpperCase()}`;
+
+      /*
+      |--------------------------------------------------------------------------
+      | Sender transaction
+      |--------------------------------------------------------------------------
+      */
+      const senderTransaction = await client.query(
+        `
+        INSERT INTO wallet_transactions
+        (
+          user_id,
+          type,
+          amount,
+          balance_after,
+          description,
+          wallet_id,
+          counterparty_wallet_id,
+          transfer_reference,
+          fee,
+          status
+        )
+        VALUES
+        ($1, $2, $3, $4, $5, $6, $7, $8, 0, 'COMPLETED')
+        RETURNING id
+        `,
+        [
+          senderUserId,
+          "TRANSFER_OUT",
+          amount,
+          senderNewBalance,
+          `LOVE transfer to ${receiverWallet.public_address}`,
+          senderWallet.id,
+          receiverWallet.id,
+          transferReference
+        ]
+      );
+
+      /*
+      |--------------------------------------------------------------------------
+      | Receiver transaction
+      |--------------------------------------------------------------------------
+      */
+      await client.query(
+        `
+        INSERT INTO wallet_transactions
+        (
+          user_id,
+          type,
+          amount,
+          balance_after,
+          description,
+          wallet_id,
+          counterparty_wallet_id,
+          transfer_reference,
+          fee,
+          status
+        )
+        VALUES
+        ($1, $2, $3, $4, $5, $6, $7, $8, 0, 'COMPLETED')
+        `,
+        [
+          Number(receiverWallet.user_id),
+          "TRANSFER_IN",
+          amount,
+          receiverNewBalance,
+          `LOVE received from ${senderWallet.public_address}`,
+          receiverWallet.id,
+          senderWallet.id,
+          transferReference
+        ]
+      );
+
+      await client.query("COMMIT");
+
+      return res.json({
+        success: true,
+        message: "LOVE transferred successfully.",
+        transfer: {
+          reference: transferReference,
+          amount,
+          fee: 0,
+          senderWallet: senderWallet.public_address,
+          receiverWallet: receiverWallet.public_address,
+          senderBalance: senderNewBalance,
+          receiverBalance: receiverNewBalance,
+          transactionId: senderTransaction.rows[0].id,
+          status: "COMPLETED"
+        }
+      });
+    } catch (error) {
+      try {
+        await client.query("ROLLBACK");
+      } catch {}
+
+      throw error;
+    } finally {
+      client.release();
+    }
+  } catch (error) {
+    console.error(
+      "POST /api/wallet/transfer error:",
+      error
+    );
+
+    res.status(500).json({
+      success: false,
+      message: error.message || "LOVE transfer failed."
+    });
+  }
+});
+
+
+/*
+|--------------------------------------------------------------------------
 | DEPOSIT
 |--------------------------------------------------------------------------
 | Existing endpoint preserved for now.
-| Direct wallet-to-wallet transfer will be added separately.
 */
 router.post("/deposit", authenticateToken, async (req, res) => {
   try {
@@ -378,7 +751,8 @@ router.post("/deposit", authenticateToken, async (req, res) => {
       res.json({
         success: true,
         message: "LOVE deposited successfully.",
-        transactionId: transactionResult.rows[0].id,
+        transactionId:
+          transactionResult.rows[0].id,
         balance: newBalance
       });
     } catch (error) {
@@ -408,8 +782,7 @@ router.post("/deposit", authenticateToken, async (req, res) => {
 |--------------------------------------------------------------------------
 | WITHDRAW
 |--------------------------------------------------------------------------
-| Existing endpoint preserved for now.
-| BSC withdrawal is NOT being implemented yet.
+| BSC withdrawal is NOT implemented yet.
 */
 router.post("/withdraw", authenticateToken, async (req, res) => {
   try {
@@ -531,4 +904,177 @@ router.post("/withdraw", authenticateToken, async (req, res) => {
 });
 
 
+
+
+/*
+|--------------------------------------------------------------------------
+| UNLOCK EXISTING WALLET
+|--------------------------------------------------------------------------
+*/
+router.get("/:walletId/transactions", authenticateToken, async (req, res) => {
+  try {
+    const userId = Number(req.user.userId);
+    const walletId = Number(req.params.walletId);
+
+    if (!Number.isInteger(walletId) || walletId <= 0) {
+      return res.status(400).json({
+        success: false,
+        message: "Valid wallet ID is required."
+      });
+    }
+
+    const walletResult = await db.query(
+      `
+        SELECT id
+        FROM user_wallets
+        WHERE id = $1
+          AND user_id = $2
+        LIMIT 1
+      `,
+      [walletId, userId]
+    );
+
+    if (!walletResult.rows[0]) {
+      return res.status(404).json({
+        success: false,
+        message: "Wallet not found."
+      });
+    }
+
+    const result = await db.query(
+      `
+        SELECT
+          id,
+          type,
+          amount,
+          balance_after,
+          description,
+          created_at,
+          wallet_id,
+          counterparty_wallet_id,
+          transfer_reference,
+          fee,
+          status
+        FROM wallet_transactions
+        WHERE wallet_id = $1
+        ORDER BY id DESC
+        LIMIT 50
+      `,
+      [walletId]
+    );
+
+    return res.json({
+      success: true,
+      walletId,
+      count: result.rows.length,
+      transactions: result.rows
+    });
+  } catch (error) {
+    console.error("GET WALLET TRANSACTIONS ERROR:", error);
+
+    return res.status(500).json({
+      success: false,
+      message: "Failed to load wallet transactions."
+    });
+  }
+});
+router.post("/unlock", authenticateToken, async (req, res) => {
+  try {
+    const userId = Number(req.user.userId);
+
+    const walletId = Number(req.body.walletId);
+
+    const privateKey =
+      typeof req.body.privateKey === "string"
+        ? req.body.privateKey.trim()
+        : "";
+
+    if (!Number.isInteger(walletId) || walletId <= 0) {
+      return res.status(400).json({
+        success: false,
+        message: "Valid wallet ID is required."
+      });
+    }
+
+    if (!privateKey) {
+      return res.status(400).json({
+        success: false,
+        message: "Private key is required."
+      });
+    }
+
+    const walletResult = await db.query(
+      `
+      SELECT
+        id,
+        user_id,
+        wallet_name,
+        public_address,
+        public_key,
+        balance,
+        total_mined,
+        is_default,
+        created_at,
+        updated_at
+      FROM user_wallets
+      WHERE id = $1
+        AND user_id = $2
+      LIMIT 1
+      `,
+      [walletId, userId]
+    );
+
+    const wallet = walletResult.rows[0];
+
+    if (!wallet) {
+      return res.status(404).json({
+        success: false,
+        message: "Wallet not found."
+      });
+    }
+
+    let derivedWallet;
+
+    try {
+      derivedWallet =
+        deriveWalletFromPrivateKey(privateKey);
+    } catch {
+      return res.status(401).json({
+        success: false,
+        message: "Invalid private key."
+      });
+    }
+
+    const publicKeyMatches =
+      derivedWallet.publicKey === wallet.public_key;
+
+    const addressMatches =
+      derivedWallet.publicAddress === wallet.public_address;
+
+    if (!publicKeyMatches || !addressMatches) {
+      return res.status(401).json({
+        success: false,
+        message: "Private key does not belong to this wallet."
+      });
+    }
+
+    return res.json({
+      success: true,
+      message: "Wallet unlocked successfully.",
+      wallet
+    });
+  } catch (error) {
+    console.error(
+      "POST /api/wallet/unlock error:",
+      error
+    );
+
+    return res.status(500).json({
+      success: false,
+      message: "Failed to unlock wallet."
+    });
+  }
+});
+
 module.exports = router;
+
