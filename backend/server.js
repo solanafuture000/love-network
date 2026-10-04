@@ -11,6 +11,7 @@ const walletRoutes = require("./routes/wallet");
 const miningRoutes = require("./routes/mining");
 const historyRoutes = require("./routes/history");
 const kycRoutes = require("./routes/kyc");
+const migrationRoutes = require("./routes/migration");
 const adminRoutes = require("./routes/admin");
 const otpRoutes = require("./routes/otp");
 
@@ -48,6 +49,7 @@ app.use("/api/wallet", walletRoutes);
 app.use("/api/mining", miningRoutes);
 app.use("/api/history", historyRoutes);
 app.use("/api/kyc", kycRoutes);
+app.use("/api/migration", migrationRoutes);
 app.use("/api/admin", adminRoutes);
 
 app.get("/api/health", (req, res) => {
