@@ -1,776 +1,1391 @@
-
-import { useEffect, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
+import { QRCodeSVG } from "qrcode.react";
+import { Html5Qrcode } from "html5-qrcode";
 import { api } from "../services/api";
 
-function WalletCard({ balance, setBalance }) {
-  const [copied, setCopied] = useState("");
-  const [action, setAction] = useState(null);
-  const [amount, setAmount] = useState("");
-  const [message, setMessage] = useState("");
-  const [transactions, setTransactions] = useState([]);
-  const [loading, setLoading] = useState(true);
+const AUTO_LOCK_MS = 10 * 60 * 1000;
 
-  const [wallets, setWallets] = useState([]);
-  const [walletsLoading, setWalletsLoading] = useState(true);
-
-  const [showCreateWallet, setShowCreateWallet] = useState(false);
-  const [walletName, setWalletName] = useState("LOVE Wallet");
-  const [creatingWallet, setCreatingWallet] = useState(false);
-
+export default function WalletCard() {
+  const [wallet, setWallet] = useState(null);
+  const [privateKey, setPrivateKey] = useState("");
   const [newWallet, setNewWallet] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [unlocking, setUnlocking] = useState(false);
+  const [creating, setCreating] = useState(false);
+  const [message, setMessage] = useState("");
+  const [error, setError] = useState("");
+  const [transactions, setTransactions] = useState([]);
+  const [showPrivateKey, setShowPrivateKey] = useState(false);
 
-  const copyText = async (value, type) => {
-    try {
-      await navigator.clipboard.writeText(value);
-      setCopied(type);
+  const [scannerOpen, setScannerOpen] = useState(false);
+  const [scannerStarting, setScannerStarting] = useState(false);
+  const [scannerError, setScannerError] = useState("");
 
-      setTimeout(() => {
-        setCopied("");
-      }, 2000);
-    } catch {
-      setCopied("");
-    }
-  };
+  const [receipt, setReceipt] = useState(null);
 
-  const loadWallet = async () => {
-    try {
-      setLoading(true);
-
-      const data = await api.getWallet();
-
-      if (data.success && data.wallet) {
-        setBalance(Number(data.wallet.balance || 0));
-        setTransactions(data.transactions || []);
-      }
-    } catch (error) {
-      console.error("WALLET API ERROR:", error);
-      setMessage(error.message || "Failed to load wallet.");
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const loadWallets = async () => {
-    try {
-      setWalletsLoading(true);
-
-      const data = await api.getWallets();
-
-      if (data.success) {
-        setWallets(data.wallets || []);
-      }
-    } catch (error) {
-      console.error("WALLETS API ERROR:", error);
-      setMessage(error.message || "Failed to load wallets.");
-    } finally {
-      setWalletsLoading(false);
-    }
-  };
+  const lockTimerRef = useRef(null);
+  const scannerRef = useRef(null);
 
   useEffect(() => {
-    loadWallet();
-    loadWallets();
+    setLoading(false);
+
+    return () => {
+      if (lockTimerRef.current) {
+        clearTimeout(lockTimerRef.current);
+      }
+
+      stopQrScanner();
+    };
   }, []);
 
-  const openAction = (type) => {
-    setAction(type);
-    setAmount("");
-    setMessage("");
-  };
+  function startAutoLock() {
+    if (lockTimerRef.current) {
+      clearTimeout(lockTimerRef.current);
+    }
 
-  const closeAction = () => {
-    setAction(null);
-    setAmount("");
-    setMessage("");
-  };
+    lockTimerRef.current = setTimeout(() => {
+      lockWallet();
+    }, AUTO_LOCK_MS);
+  }
 
-  const handleSubmit = (event) => {
+  async function stopQrScanner() {
+    const scanner = scannerRef.current;
+
+    if (!scanner) {
+      return;
+    }
+
+    try {
+      const state = scanner.getState();
+
+      if (
+        state === 2 ||
+        state === 3
+      ) {
+        await scanner.stop();
+      }
+    } catch {
+      // Scanner may already be stopped.
+    }
+
+    try {
+      await scanner.clear();
+    } catch {
+      // Ignore cleanup errors.
+    }
+
+    scannerRef.current = null;
+  }
+
+  function lockWallet() {
+    if (lockTimerRef.current) {
+      clearTimeout(lockTimerRef.current);
+      lockTimerRef.current = null;
+    }
+
+    stopQrScanner();
+
+    setWallet(null);
+    setPrivateKey("");
+    setTransactions([]);
+    setMessage("");
+    setError("");
+    setShowPrivateKey(false);
+    setReceipt(null);
+    setScannerOpen(false);
+    setScannerError("");
+  }
+
+  async function handleCreateWallet() {
+    setCreating(true);
+    setError("");
+    setMessage("");
+    setNewWallet(null);
+
+    try {
+      const result = await api.createWallet("LOVE Wallet");
+
+      if (!result?.success || !result?.wallet) {
+        throw new Error(result?.message || "Failed to create wallet");
+      }
+
+      setNewWallet({
+        ...result.wallet,
+        privateKey: result.privateKey
+      });
+
+      setMessage(
+        "New wallet created. Save the private key securely before leaving this page."
+      );
+    } catch (err) {
+      setError(err.message || "Failed to create wallet");
+    } finally {
+      setCreating(false);
+    }
+  }
+
+  async function handleUnlock() {
+    const key = privateKey.trim();
+
+    if (!key) {
+      setError("Please paste your private key.");
+      return;
+    }
+
+    setUnlocking(true);
+    setError("");
+    setMessage("");
+
+    try {
+      const listResult = await api.getWallets();
+
+      if (!listResult?.success || !Array.isArray(listResult.wallets)) {
+        throw new Error(
+          listResult?.message || "Unable to access wallets."
+        );
+      }
+
+      let unlockedWallet = null;
+
+      for (const candidate of listResult.wallets) {
+        try {
+          const result = await api.unlockWallet(
+            candidate.id,
+            key
+          );
+
+          if (result?.success && result.wallet) {
+            unlockedWallet = result.wallet;
+            break;
+          }
+        } catch {
+          // Try the next stored wallet.
+        }
+      }
+
+      if (!unlockedWallet) {
+        throw new Error(
+          "Private key does not match any wallet."
+        );
+      }
+
+      setWallet(unlockedWallet);
+      setPrivateKey("");
+      setNewWallet(null);
+      setReceipt(null);
+
+      startAutoLock();
+
+      await loadTransactions(unlockedWallet.id);
+    } catch (err) {
+      setError(
+        err.message || "Failed to unlock wallet."
+      );
+    } finally {
+      setUnlocking(false);
+    }
+  }
+
+  async function loadTransactions(walletId) {
+    try {
+      const result =
+        await api.getWalletTransactions(walletId);
+
+      if (
+        result?.success &&
+        Array.isArray(result.transactions)
+      ) {
+        setTransactions(result.transactions);
+      } else {
+        setTransactions([]);
+      }
+    } catch {
+      setTransactions([]);
+    }
+  }
+
+  function transactionLabel(type) {
+    const value = String(type || "").toLowerCase();
+
+    if (value.includes("deposit")) return "Deposit";
+    if (value.includes("withdraw")) return "Withdrawal";
+
+    if (
+      value.includes("receive") ||
+      value.includes("transfer_in") ||
+      value.includes("transfer in")
+    ) {
+      return "Received";
+    }
+
+    if (
+      value.includes("send") ||
+      value.includes("transfer_out") ||
+      value.includes("transfer out")
+    ) {
+      return "Sent";
+    }
+
+    if (value.includes("mining")) return "Mining Reward";
+
+    return type || "Transaction";
+  }
+
+  function transactionIsPositive(type) {
+    const value = String(type || "").toLowerCase();
+
+    return (
+      value.includes("deposit") ||
+      value.includes("receive") ||
+      value.includes("transfer_in") ||
+      value.includes("transfer in") ||
+      value.includes("mining")
+    );
+  }
+
+  function extractLoveAddress(value) {
+    const text = String(value || "")
+      .trim()
+      .toUpperCase();
+
+    const match = text.match(/LOVE[A-Z0-9]{40}/);
+
+    if (!match) {
+      return "";
+    }
+
+    return match[0];
+  }
+
+  async function startQrScanner() {
+    setScannerError("");
+    setError("");
+    setMessage("");
+    setScannerOpen(true);
+    setScannerStarting(true);
+
+    try {
+      await new Promise((resolve) => {
+        setTimeout(resolve, 250);
+      });
+
+      await stopQrScanner();
+
+      const scanner = new Html5Qrcode(
+        "love-qr-reader"
+      );
+
+      scannerRef.current = scanner;
+
+      await scanner.start(
+        {
+          facingMode: "environment"
+        },
+        {
+          fps: 10,
+          qrbox: {
+            width: 240,
+            height: 240
+          },
+          aspectRatio: 1
+        },
+        async (decodedText) => {
+          const address =
+            extractLoveAddress(decodedText);
+
+          if (!address) {
+            setScannerError(
+              "This QR code does not contain a valid LOVE wallet address."
+            );
+            return;
+          }
+
+          const receiverInput =
+            document.querySelector(
+              'input[name="receiverAddress"]'
+            );
+
+          if (receiverInput) {
+            receiverInput.value = address;
+          }
+
+          await stopQrScanner();
+
+          setScannerOpen(false);
+          setScannerStarting(false);
+          setScannerError("");
+
+          setMessage(
+            "LOVE wallet address scanned successfully."
+          );
+        },
+        () => {
+          // Ignore normal QR scanning misses.
+        }
+      );
+
+      setScannerStarting(false);
+    } catch (err) {
+      await stopQrScanner();
+
+      setScannerStarting(false);
+      setScannerOpen(false);
+
+      setScannerError(
+        err?.message ||
+          "Unable to start camera. Please allow camera access."
+      );
+
+      setError(
+        "Unable to start QR scanner. Please allow camera access and try again."
+      );
+    }
+  }
+
+  async function closeQrScanner() {
+    await stopQrScanner();
+
+    setScannerOpen(false);
+    setScannerStarting(false);
+    setScannerError("");
+  }
+
+  function downloadReceipt() {
+    if (!receipt) {
+      return;
+    }
+
+    const canvas =
+      document.createElement("canvas");
+
+    const ctx = canvas.getContext("2d");
+
+    if (!ctx) {
+      return;
+    }
+
+    const width = 900;
+    const height = 1050;
+
+    canvas.width = width;
+    canvas.height = height;
+
+    ctx.fillStyle = "#ffffff";
+    ctx.fillRect(0, 0, width, height);
+
+    ctx.fillStyle = "#111827";
+    ctx.textAlign = "center";
+
+    ctx.font =
+      "700 42px Arial";
+
+    ctx.fillText(
+      "LOVE Network",
+      width / 2,
+      70
+    );
+
+    ctx.font =
+      "700 34px Arial";
+
+    ctx.fillText(
+      "Transaction Receipt",
+      width / 2,
+      125
+    );
+
+    ctx.font =
+      "700 30px Arial";
+
+    ctx.fillStyle = "#15803d";
+
+    ctx.fillText(
+      "TRANSACTION SUCCESSFUL",
+      width / 2,
+      180
+    );
+
+    ctx.textAlign = "left";
+    ctx.fillStyle = "#111827";
+
+    const rows = [
+      ["Status", receipt.status],
+      ["Amount", `${Number(receipt.amount).toFixed(6)} LOVE`],
+      ["Fee", `${Number(receipt.fee || 0).toFixed(6)} LOVE`],
+      ["Transaction ID", String(receipt.transactionId)],
+      ["Reference", receipt.reference],
+      ["From", receipt.senderWallet],
+      ["To", receipt.receiverWallet],
+      ["Date", receipt.date]
+    ];
+
+    let y = 250;
+
+    for (const [label, value] of rows) {
+      ctx.font =
+        "700 22px Arial";
+
+      ctx.fillStyle = "#374151";
+
+      ctx.fillText(
+        `${label}:`,
+        55,
+        y
+      );
+
+      ctx.font =
+        "20px Arial";
+
+      ctx.fillStyle = "#111827";
+
+      const text = String(value || "");
+
+      if (text.length > 55) {
+        const first =
+          text.slice(0, 55);
+
+        const second =
+          text.slice(55);
+
+        ctx.fillText(
+          first,
+          250,
+          y
+        );
+
+        y += 28;
+
+        ctx.fillText(
+          second,
+          250,
+          y
+        );
+      } else {
+        ctx.fillText(
+          text,
+          250,
+          y
+        );
+      }
+
+      y += 70;
+    }
+
+    ctx.strokeStyle = "#d1d5db";
+    ctx.lineWidth = 2;
+
+    ctx.beginPath();
+    ctx.moveTo(55, y);
+    ctx.lineTo(width - 55, y);
+    ctx.stroke();
+
+    y += 55;
+
+    ctx.textAlign = "center";
+    ctx.font =
+      "18px Arial";
+
+    ctx.fillStyle = "#6b7280";
+
+    ctx.fillText(
+      "Keep this receipt for your records.",
+      width / 2,
+      y
+    );
+
+    const link =
+      document.createElement("a");
+
+    link.download =
+      `LOVE-Receipt-${receipt.transactionId}.png`;
+
+    link.href =
+      canvas.toDataURL("image/png");
+
+    link.click();
+  }
+
+  async function handleSend(event) {
     event.preventDefault();
 
-    const value = Number(amount);
+    const form =
+      new FormData(event.currentTarget);
 
-    if (!value || value <= 0) {
-      setMessage("Enter a valid amount.");
+    const receiverAddress =
+      String(
+        form.get("receiverAddress") || ""
+      )
+        .trim()
+        .toUpperCase();
+
+    const amount =
+      Number(form.get("amount"));
+
+    if (!wallet) {
+      setError(
+        "Unlock your wallet first."
+      );
+      return;
+    }
+
+    if (!receiverAddress) {
+      setError(
+        "Receiver address is required."
+      );
       return;
     }
 
     if (
-      action === "withdraw" &&
-      value > Number(balance)
+      !Number.isFinite(amount) ||
+      amount <= 0
     ) {
-      setMessage("Insufficient LOVE balance.");
+      setError(
+        "Enter a valid amount."
+      );
       return;
     }
 
-    setMessage(
-      action === "deposit"
-        ? "Deposit processing will be connected next."
-        : "Withdraw processing will be connected next."
-    );
-  };
-
-  const handleCreateWallet = async (event) => {
-    event.preventDefault();
-
-    const name = walletName.trim();
-
-    if (!name) {
-      setMessage("Enter a wallet name.");
+    if (
+      receiverAddress.length !== 44 ||
+      !receiverAddress.startsWith("LOVE")
+    ) {
+      setError(
+        "Invalid LOVE wallet address."
+      );
       return;
     }
+
+    setError("");
+    setMessage("");
+    setReceipt(null);
 
     try {
-      setCreatingWallet(true);
-      setMessage("");
-      setNewWallet(null);
+      const result =
+        await api.transfer({
+          receiverAddress,
+          amount,
+          walletId: wallet.id
+        });
 
-      const data = await api.createWallet(name);
-
-      if (!data.success || !data.wallet) {
+      if (!result?.success) {
         throw new Error(
-          data.message || "Wallet creation failed."
+          result?.message ||
+            "Transfer failed."
         );
       }
 
-      setNewWallet({
-        wallet: data.wallet,
-        privateKey: data.privateKey,
-        warning: data.warning
+      const transfer =
+        result.transfer || {};
+
+      setReceipt({
+        reference:
+          transfer.reference || "N/A",
+        amount:
+          Number(
+            transfer.amount ?? amount
+          ),
+        fee:
+          Number(
+            transfer.fee || 0
+          ),
+        senderWallet:
+          transfer.senderWallet ||
+          address,
+        receiverWallet:
+          transfer.receiverWallet ||
+          receiverAddress,
+        senderBalance:
+          Number(
+            transfer.senderBalance ??
+              0
+          ),
+        transactionId:
+          transfer.transactionId ||
+          "N/A",
+        status:
+          transfer.status ||
+          "COMPLETED",
+        date:
+          new Date().toLocaleString()
       });
 
-      setWalletName("LOVE Wallet");
-      setShowCreateWallet(false);
-
-      await loadWallets();
-    } catch (error) {
-      console.error("CREATE WALLET ERROR:", error);
-
       setMessage(
-        error.message || "Failed to create wallet."
+        "LOVE transfer completed successfully."
       );
-    } finally {
-      setCreatingWallet(false);
+
+      event.currentTarget.reset();
+
+      const refreshed =
+        await api.getWallets();
+
+      const updatedWallet =
+        refreshed?.wallets?.find(
+          (item) =>
+            Number(item.id) ===
+            Number(wallet.id)
+        );
+
+      if (updatedWallet) {
+        setWallet(updatedWallet);
+      }
+
+      await loadTransactions(
+        wallet.id
+      );
+
+      startAutoLock();
+    } catch (err) {
+      setError(
+        err.message ||
+          "Transfer failed."
+      );
     }
-  };
+  }
 
-  const closeNewWallet = () => {
-    setNewWallet(null);
-  };
-
-  return (
-    <section className="settings-card" id="wallet">
-
-      {/* ------------------------------------------------ */}
-      {/* HEADER */}
-      {/* ------------------------------------------------ */}
-
-      <div className="section-heading">
-        <div>
-          <span>Wallet</span>
-
-          <h3>LOVE Wallet</h3>
-
-          <p>
-            Manage your LOVE wallets and transactions.
-          </p>
+  if (loading) {
+    return (
+      <div className="dashboard-card">
+        <div className="dashboard-card-title">
+          LOVE Wallet
         </div>
 
-        <div className="settings-icon">
-          L
+        <div className="dashboard-card-subtitle">
+          Loading...
         </div>
       </div>
+    );
+  }
 
-
-      {/* ------------------------------------------------ */}
-      {/* MAIN BALANCE */}
-      {/* ------------------------------------------------ */}
-
-      <div className="settings-list">
-
-        <div className="settings-row">
-          <div>
-            <strong>Available Balance</strong>
-
-            <small>
-              Your current LOVE wallet balance.
-            </small>
-          </div>
-
-          <strong>
-            {loading
-              ? "Loading..."
-              : `${Number(balance).toFixed(2)} LOVE`}
-          </strong>
+  if (!wallet) {
+    return (
+      <div className="dashboard-card">
+        <div className="dashboard-card-title">
+          LOVE Wallet
         </div>
 
+        <div className="dashboard-card-subtitle">
+          Unlock your wallet with your private key.
+        </div>
 
-        {/* ------------------------------------------------ */}
-        {/* CREATE WALLET */}
-        {/* ------------------------------------------------ */}
+        <div style={{ marginTop: 20 }}>
+          <label
+            style={{
+              display: "block",
+              marginBottom: 8,
+              fontWeight: 600
+            }}
+          >
+            Private Key
+          </label>
 
-        <div className="settings-row">
-          <div>
-            <strong>My Wallets</strong>
-
-            <small>
-              Create and manage your LOVE wallets.
-            </small>
-          </div>
+          <textarea
+            value={privateKey}
+            onChange={(e) => {
+              setPrivateKey(
+                e.target.value
+              );
+              setError("");
+            }}
+            placeholder="Paste your private key here"
+            rows={5}
+            style={{
+              width: "100%",
+              boxSizing: "border-box",
+              padding: 12,
+              resize: "vertical"
+            }}
+          />
 
           <button
             type="button"
-            className="settings-action-button"
-            onClick={() => {
-              setShowCreateWallet(true);
-              setMessage("");
+            onClick={handleUnlock}
+            disabled={unlocking}
+            style={{
+              width: "100%",
+              marginTop: 10
             }}
           >
-            + Add Wallet
+            {unlocking
+              ? "Unlocking..."
+              : "Unlock Wallet"}
           </button>
         </div>
 
-
-        {/* ------------------------------------------------ */}
-        {/* CREATE WALLET FORM */}
-        {/* ------------------------------------------------ */}
-
-        {showCreateWallet && (
-          <form
-            className="settings-form"
-            onSubmit={handleCreateWallet}
-          >
-            <label>
-              Wallet Name
-
-              <input
-                type="text"
-                value={walletName}
-                maxLength={50}
-                onChange={(event) =>
-                  setWalletName(event.target.value)
-                }
-                placeholder="LOVE Wallet"
-                required
-              />
-            </label>
-
-            <div className="settings-message">
-              A new public/private key pair will be generated
-              for this wallet.
-            </div>
-
-            <div className="settings-form-actions">
-              <button
-                type="button"
-                onClick={() => {
-                  setShowCreateWallet(false);
-                  setMessage("");
-                }}
-                disabled={creatingWallet}
-              >
-                Cancel
-              </button>
-
-              <button
-                type="submit"
-                disabled={creatingWallet}
-              >
-                {creatingWallet
-                  ? "Creating..."
-                  : "Create Wallet"}
-              </button>
-            </div>
-          </form>
-        )}
-
-
-        {/* ------------------------------------------------ */}
-        {/* WALLET LIST */}
-        {/* ------------------------------------------------ */}
-
-        <div className="wallet-history">
-
-          <div className="wallet-history-header">
-            <div>
-              <small>Wallets</small>
-
-              <h4>My LOVE Wallets</h4>
-            </div>
-
-            <span>
-              {wallets.length}
-            </span>
-          </div>
-
-
-          {walletsLoading ? (
-            <div className="wallet-empty">
-              Loading wallets...
-            </div>
-          ) : wallets.length === 0 ? (
-            <div className="wallet-empty">
-              No wallet created yet.
-            </div>
-          ) : (
-            <div className="wallet-transactions">
-
-              {wallets.map((wallet) => (
-                <div
-                  className="wallet-transaction"
-                  key={wallet.id}
-                >
-
-                  <div>
-                    <strong>
-                      {wallet.wallet_name}
-                    </strong>
-
-                    <small>
-                      {wallet.is_default
-                        ? "Default Wallet"
-                        : "LOVE Wallet"}
-                    </small>
-
-                    <small>
-                      {wallet.public_address}
-                    </small>
-                  </div>
-
-                  <div className="wallet-transaction-right">
-
-                    <strong>
-                      {Number(
-                        wallet.balance || 0
-                      ).toFixed(2)}{" "}
-                      LOVE
-                    </strong>
-
-                    <button
-                      type="button"
-                      className="settings-action-button"
-                      onClick={() =>
-                        copyText(
-                          wallet.public_address,
-                          `address-${wallet.id}`
-                        )
-                      }
-                    >
-                      {copied ===
-                      `address-${wallet.id}`
-                        ? "Copied"
-                        : "Copy"}
-                    </button>
-
-                  </div>
-
-                </div>
-              ))}
-
-            </div>
-          )}
-
+        <div
+          style={{
+            textAlign: "center",
+            margin: "18px 0",
+            opacity: 0.7
+          }}
+        >
+          OR
         </div>
 
-
-        {/* ------------------------------------------------ */}
-        {/* NEW WALLET PRIVATE KEY */}
-        {/* ------------------------------------------------ */}
+        <button
+          type="button"
+          onClick={handleCreateWallet}
+          disabled={creating}
+          style={{
+            width: "100%"
+          }}
+        >
+          {creating
+            ? "Creating..."
+            : "Create Wallet"}
+        </button>
 
         {newWallet && (
-          <div className="settings-message">
-
+          <div
+            style={{
+              marginTop: 20,
+              padding: 16,
+              borderRadius: 12,
+              border:
+                "1px solid rgba(255,255,255,0.12)"
+            }}
+          >
             <strong>
-              Wallet Created Successfully
+              New Wallet Created
             </strong>
 
-            <p>
-              {newWallet.warning}
-            </p>
-
-            <div className="settings-row">
-              <div>
-                <strong>
-                  Wallet Address
-                </strong>
-
-                <small>
-                  {newWallet.wallet.public_address}
-                </small>
-              </div>
-
-              <button
-                type="button"
-                className="settings-action-button"
-                onClick={() =>
-                  copyText(
-                    newWallet.wallet.public_address,
-                    "new-address"
-                  )
-                }
-              >
-                {copied === "new-address"
-                  ? "Copied"
-                  : "Copy"}
-              </button>
-            </div>
-
-
-            <div className="settings-row">
-              <div>
-                <strong>
-                  Public Key
-                </strong>
-
-                <small>
-                  {newWallet.wallet.public_key}
-                </small>
-              </div>
-
-              <button
-                type="button"
-                className="settings-action-button"
-                onClick={() =>
-                  copyText(
-                    newWallet.wallet.public_key,
-                    "public-key"
-                  )
-                }
-              >
-                {copied === "public-key"
-                  ? "Copied"
-                  : "Copy"}
-              </button>
-            </div>
-
-
-            <div className="settings-row">
-              <div>
-                <strong>
-                  Private Key
-                </strong>
-
-                <small>
-                  Save this key securely. It will not be
-                  shown again.
-                </small>
-
-                <small>
-                  {newWallet.privateKey}
-                </small>
-              </div>
-
-              <button
-                type="button"
-                className="settings-action-button"
-                onClick={() =>
-                  copyText(
-                    newWallet.privateKey,
-                    "private-key"
-                  )
-                }
-              >
-                {copied === "private-key"
-                  ? "Copied"
-                  : "Copy"}
-              </button>
-            </div>
-
-
-            <button
-              type="button"
-              onClick={closeNewWallet}
+            <div
+              style={{
+                marginTop: 14
+              }}
             >
-              I Saved My Private Key
-            </button>
+              <strong>
+                Public Address
+              </strong>
 
+              <div
+                style={{
+                  marginTop: 6,
+                  wordBreak:
+                    "break-all"
+                }}
+              >
+                {newWallet.public_address ||
+                  newWallet.publicAddress}
+              </div>
+            </div>
+
+            <div
+              style={{
+                marginTop: 14
+              }}
+            >
+              <strong>
+                Public Key
+              </strong>
+
+              <div
+                style={{
+                  marginTop: 6,
+                  wordBreak:
+                    "break-all"
+                }}
+              >
+                {newWallet.public_key ||
+                  newWallet.publicKey}
+              </div>
+            </div>
+
+            <div
+              style={{
+                marginTop: 16
+              }}
+            >
+              <strong>
+                Private Key
+              </strong>
+
+              <div
+                style={{
+                  marginTop: 8,
+                  padding: 10,
+                  borderRadius: 8,
+                  background:
+                    "rgba(0,0,0,0.2)",
+                  wordBreak:
+                    "break-all"
+                }}
+              >
+                {showPrivateKey
+                  ? newWallet.privateKey
+                  : "Private key hidden. Click Show Private Key."}
+              </div>
+
+              <button
+                type="button"
+                onClick={() =>
+                  setShowPrivateKey(
+                    (value) => !value
+                  )
+                }
+                style={{
+                  marginTop: 10
+                }}
+              >
+                {showPrivateKey
+                  ? "Hide Private Key"
+                  : "Show Private Key"}
+              </button>
+            </div>
+
+            <div
+              style={{
+                marginTop: 14
+              }}
+            >
+              Save this private key securely. It will not be shown again.
+            </div>
           </div>
         )}
 
-
-        {/* ------------------------------------------------ */}
-        {/* CURRENT WALLET ADDRESS */}
-        {/* ------------------------------------------------ */}
-
-        {!showCreateWallet &&
-          !newWallet &&
-          wallets.length > 0 && (
-            <div className="settings-row">
-
-              <div>
-                <strong>
-                  Default Wallet Address
-                </strong>
-
-                <small>
-                  {wallets.find(
-                    (wallet) =>
-                      wallet.is_default
-                  )?.public_address ||
-                    wallets[0].public_address}
-                </small>
-              </div>
-
-              <button
-                type="button"
-                className="settings-action-button"
-                onClick={() =>
-                  copyText(
-                    wallets.find(
-                      (wallet) =>
-                        wallet.is_default
-                    )?.public_address ||
-                      wallets[0].public_address,
-                    "default-address"
-                  )
-                }
-              >
-                {copied === "default-address"
-                  ? "Copied"
-                  : "Copy"}
-              </button>
-
-            </div>
-          )}
-
-
-        {/* ------------------------------------------------ */}
-        {/* DEPOSIT / WITHDRAW */}
-        {/* ------------------------------------------------ */}
-
-        {!action && (
-          <>
-            <div className="settings-row">
-
-              <div>
-                <strong>
-                  Deposit LOVE
-                </strong>
-
-                <small>
-                  Add LOVE to your wallet balance.
-                </small>
-              </div>
-
-              <button
-                type="button"
-                className="settings-action-button"
-                onClick={() =>
-                  openAction("deposit")
-                }
-              >
-                Deposit
-              </button>
-
-            </div>
-
-
-            <div className="settings-row">
-
-              <div>
-                <strong>
-                  Withdraw LOVE
-                </strong>
-
-                <small>
-                  BSC withdrawal will be added later.
-                </small>
-              </div>
-
-              <button
-                type="button"
-                className="settings-action-button"
-                onClick={() =>
-                  openAction("withdraw")
-                }
-              >
-                Withdraw
-              </button>
-
-            </div>
-          </>
-        )}
-
-
-        {/* ------------------------------------------------ */}
-        {/* DEPOSIT / WITHDRAW FORM */}
-        {/* ------------------------------------------------ */}
-
-        {action && (
-          <form
-            className="settings-form"
-            onSubmit={handleSubmit}
+        {error && (
+          <div
+            style={{
+              marginTop: 16
+            }}
+            className="error-message"
           >
-
-            <label>
-              {action === "deposit"
-                ? "Deposit Amount"
-                : "Withdraw Amount"}
-
-              <input
-                type="number"
-                min="0"
-                step="0.01"
-                value={amount}
-                onChange={(event) =>
-                  setAmount(
-                    event.target.value
-                  )
-                }
-                placeholder="0.00 LOVE"
-                required
-              />
-            </label>
-
-
-            {message && (
-              <div className="settings-message">
-                {message}
-              </div>
-            )}
-
-
-            <div className="settings-form-actions">
-
-              <button
-                type="button"
-                onClick={closeAction}
-              >
-                Cancel
-              </button>
-
-              <button type="submit">
-                {action === "deposit"
-                  ? "Deposit LOVE"
-                  : "Withdraw LOVE"}
-              </button>
-
-            </div>
-
-          </form>
+            {error}
+          </div>
         )}
 
-      </div>
-
-
-      {/* ------------------------------------------------ */}
-      {/* GENERAL MESSAGE */}
-      {/* ------------------------------------------------ */}
-
-      {!action &&
-        message &&
-        !newWallet && (
-          <div className="settings-message">
+        {message && (
+          <div
+            style={{
+              marginTop: 16
+            }}
+            className="success-message"
+          >
             {message}
           </div>
         )}
+      </div>
+    );
+  }
 
+  const address =
+    wallet.public_address ||
+    wallet.publicAddress;
 
-      {/* ------------------------------------------------ */}
-      {/* TRANSACTION HISTORY */}
-      {/* ------------------------------------------------ */}
+  const balance =
+    Number(wallet.balance || 0);
 
-      <div className="wallet-history">
-
-        <div className="wallet-history-header">
-
-          <div>
-            <small>
-              History
-            </small>
-
-            <h4>
-              Recent Transactions
-            </h4>
+  return (
+    <div className="dashboard-card">
+      <div
+        style={{
+          display: "flex",
+          justifyContent:
+            "space-between",
+          alignItems: "center",
+          gap: 12
+        }}
+      >
+        <div>
+          <div className="dashboard-card-title">
+            LOVE Wallet
           </div>
 
-          <span>
-            {transactions.length}
-          </span>
-
+          <div className="dashboard-card-subtitle">
+            Wallet Unlocked
+          </div>
         </div>
 
+        <button
+          type="button"
+          onClick={lockWallet}
+        >
+          Lock
+        </button>
+      </div>
 
-        {loading ? (
-          <div className="wallet-empty">
-            Loading transactions...
+      <div style={{ marginTop: 20 }}>
+        <div className="dashboard-card-subtitle">
+          Balance
+        </div>
+
+        <div
+          style={{
+            fontSize: 30,
+            fontWeight: 700,
+            marginTop: 4
+          }}
+        >
+          {balance.toFixed(6)} LOVE
+        </div>
+      </div>
+
+      <div style={{ marginTop: 18 }}>
+        <div className="dashboard-card-subtitle">
+          Wallet Address
+        </div>
+
+        <div
+          style={{
+            marginTop: 6,
+            wordBreak: "break-all"
+          }}
+        >
+          {address}
+        </div>
+      </div>
+
+      <div
+        style={{
+          display: "flex",
+          justifyContent:
+            "center",
+          margin: "22px 0"
+        }}
+      >
+        <QRCodeSVG
+          value={address}
+          size={190}
+        />
+      </div>
+
+      <div
+        style={{
+          display: "grid",
+          gridTemplateColumns:
+            "1fr 1fr",
+          gap: 12
+        }}
+      >
+        <div
+          style={{
+            padding: 14,
+            borderRadius: 12,
+            border:
+              "1px solid rgba(255,255,255,0.12)"
+          }}
+        >
+          <strong>
+            Receive
+          </strong>
+
+          <div
+            style={{
+              marginTop: 6,
+              fontSize: 13,
+              opacity: 0.7
+            }}
+          >
+            Share your LOVE address or QR code.
           </div>
-        ) : transactions.length === 0 ? (
-          <div className="wallet-empty">
-            No transactions yet.
+        </div>
+
+        <form
+          onSubmit={handleSend}
+          style={{
+            padding: 14,
+            borderRadius: 12,
+            border:
+              "1px solid rgba(255,255,255,0.12)"
+          }}
+        >
+          <strong>
+            Send
+          </strong>
+
+          <div
+            style={{
+              display: "flex",
+              gap: 8,
+              marginTop: 10
+            }}
+          >
+            <input
+              name="receiverAddress"
+              placeholder="Receiver LOVE address"
+              style={{
+                flex: 1,
+                minWidth: 0,
+                boxSizing:
+                  "border-box",
+                padding: 10
+              }}
+            />
+
+            <button
+              type="button"
+              onClick={startQrScanner}
+              style={{
+                whiteSpace:
+                  "nowrap"
+              }}
+            >
+              Scan QR
+            </button>
+          </div>
+
+          <input
+            name="amount"
+            type="number"
+            min="0"
+            step="0.000001"
+            placeholder="Amount"
+            style={{
+              width: "100%",
+              boxSizing:
+                "border-box",
+              marginTop: 8,
+              padding: 10
+            }}
+          />
+
+          <button
+            type="submit"
+            style={{
+              width: "100%",
+              marginTop: 8
+            }}
+          >
+            Send LOVE
+          </button>
+        </form>
+      </div>
+
+      {scannerOpen && (
+        <div
+          style={{
+            marginTop: 18,
+            padding: 16,
+            borderRadius: 12,
+            border:
+              "1px solid rgba(255,255,255,0.12)"
+          }}
+        >
+          <div
+            style={{
+              display: "flex",
+              justifyContent:
+                "space-between",
+              alignItems: "center",
+              gap: 10
+            }}
+          >
+            <strong>
+              Scan LOVE Wallet QR
+            </strong>
+
+            <button
+              type="button"
+              onClick={closeQrScanner}
+            >
+              Close
+            </button>
+          </div>
+
+          <div
+            id="love-qr-reader"
+            style={{
+              width: "100%",
+              maxWidth: 420,
+              margin:
+                "16px auto 0"
+            }}
+          />
+
+          {scannerStarting && (
+            <div
+              style={{
+                marginTop: 10,
+                textAlign: "center"
+              }}
+            >
+              Starting camera...
+            </div>
+          )}
+
+          {scannerError && (
+            <div
+              className="error-message"
+              style={{
+                marginTop: 10
+              }}
+            >
+              {scannerError}
+            </div>
+          )}
+
+          <div
+            style={{
+              marginTop: 10,
+              fontSize: 13,
+              opacity: 0.7,
+              textAlign: "center"
+            }}
+          >
+            Point the camera at the receiver's LOVE wallet QR code.
+          </div>
+        </div>
+      )}
+
+      {receipt && (
+        <div
+          style={{
+            marginTop: 20,
+            padding: 18,
+            borderRadius: 14,
+            border:
+              "1px solid rgba(255,255,255,0.16)"
+          }}
+        >
+          <div
+            style={{
+              display: "flex",
+              justifyContent:
+                "space-between",
+              alignItems: "center",
+              gap: 12
+            }}
+          >
+            <div>
+              <div className="dashboard-card-title">
+                Transaction Receipt
+              </div>
+
+              <div
+                className="dashboard-card-subtitle"
+                style={{
+                  marginTop: 4
+                }}
+              >
+                Transaction Successful
+              </div>
+            </div>
+
+            <button
+              type="button"
+              onClick={downloadReceipt}
+            >
+              Save Receipt
+            </button>
+          </div>
+
+          <div
+            style={{
+              marginTop: 16,
+              display: "grid",
+              gap: 10
+            }}
+          >
+            <div>
+              <strong>
+                Status
+              </strong>
+
+              <div>
+                {receipt.status}
+              </div>
+            </div>
+
+            <div>
+              <strong>
+                Amount
+              </strong>
+
+              <div>
+                {receipt.amount.toFixed(6)} LOVE
+              </div>
+            </div>
+
+            <div>
+              <strong>
+                Fee
+              </strong>
+
+              <div>
+                {receipt.fee.toFixed(6)} LOVE
+              </div>
+            </div>
+
+            <div>
+              <strong>
+                Transaction ID
+              </strong>
+
+              <div
+                style={{
+                  wordBreak:
+                    "break-all"
+                }}
+              >
+                {receipt.transactionId}
+              </div>
+            </div>
+
+            <div>
+              <strong>
+                Transfer Reference
+              </strong>
+
+              <div
+                style={{
+                  wordBreak:
+                    "break-all"
+                }}
+              >
+                {receipt.reference}
+              </div>
+            </div>
+
+            <div>
+              <strong>
+                From
+              </strong>
+
+              <div
+                style={{
+                  wordBreak:
+                    "break-all"
+                }}
+              >
+                {receipt.senderWallet}
+              </div>
+            </div>
+
+            <div>
+              <strong>
+                To
+              </strong>
+
+              <div
+                style={{
+                  wordBreak:
+                    "break-all"
+                }}
+              >
+                {receipt.receiverWallet}
+              </div>
+            </div>
+
+            <div>
+              <strong>
+                Date
+              </strong>
+
+              <div>
+                {receipt.date}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {message && (
+        <div
+          style={{
+            marginTop: 16
+          }}
+          className="success-message"
+        >
+          {message}
+        </div>
+      )}
+
+      {error && (
+        <div
+          style={{
+            marginTop: 16
+          }}
+          className="error-message"
+        >
+          {error}
+        </div>
+      )}
+
+      <div style={{ marginTop: 24 }}>
+        <div className="dashboard-card-title">
+          Transactions
+        </div>
+
+        {transactions.length === 0 ? (
+          <div
+            className="dashboard-card-subtitle"
+            style={{
+              marginTop: 10
+            }}
+          >
+            No transactions for this wallet.
           </div>
         ) : (
-          <div className="wallet-transactions">
-
-            {transactions
-              .slice(0, 10)
-              .map((transaction) => {
-
-                const isPositive =
-                  transaction.type ===
-                    "DEPOSIT" ||
-                  transaction.type ===
-                    "deposit" ||
-                  transaction.type ===
-                    "MINING_REWARD";
+          <div
+            style={{
+              marginTop: 10
+            }}
+          >
+            {transactions.map(
+              (transaction) => {
+                const positive =
+                  transactionIsPositive(
+                    transaction.type
+                  );
 
                 return (
                   <div
-                    className="wallet-transaction"
-                    key={transaction.id}
+                    key={
+                      transaction.id
+                    }
+                    style={{
+                      padding:
+                        "12px 0",
+                      borderBottom:
+                        "1px solid rgba(255,255,255,0.08)"
+                    }}
                   >
-
-                    <div>
-
+                    <div
+                      style={{
+                        display:
+                          "flex",
+                        justifyContent:
+                          "space-between",
+                        gap: 12
+                      }}
+                    >
                       <strong>
-                        {transaction.type}
+                        {transactionLabel(
+                          transaction.type
+                        )}
                       </strong>
 
-                      <small>
-                        {transaction.created_at
-                          ? new Date(
-                              transaction.created_at
-                            ).toLocaleString()
-                          : ""}
-                      </small>
-
-                    </div>
-
-
-                    <div className="wallet-transaction-right">
-
-                      <strong
-                        className={
-                          isPositive
-                            ? "transaction-positive"
-                            : "transaction-negative"
-                        }
-                      >
-                        {isPositive
+                      <span>
+                        {positive
                           ? "+"
                           : "-"}
                         {Number(
-                          transaction.amount
-                        ).toFixed(2)}{" "}
+                          transaction.amount ||
+                            0
+                        ).toFixed(6)}{" "}
                         LOVE
-                      </strong>
-
-                      <small>
-                        Completed
-                      </small>
-
+                      </span>
                     </div>
 
+                    {transaction.description && (
+                      <div
+                        style={{
+                          marginTop: 4,
+                          fontSize: 13,
+                          opacity: 0.65
+                        }}
+                      >
+                        {
+                          transaction.description
+                        }
+                      </div>
+                    )}
                   </div>
                 );
-              })}
-
+              }
+            )}
           </div>
         )}
-
       </div>
-
-    </section>
+    </div>
   );
 }
-
-export default WalletCard;

@@ -285,13 +285,7 @@ router.post(
       }
 
 
-      if (password.length < 6) {
-        return res.status(400).json({
-          success: false,
-          message:
-            "Password must be at least 6 characters"
-        });
-      }
+      if (!/(?=.*[A-Z])(?=.*[a-z])(?=.*\d)(?=.*[^A-Za-z0-9])(?=.{8,})/.test(password)) { return res.status(400).json({ success: false, message: "Password must be at least 8 characters and include uppercase, lowercase, number and special character" }); }
 
 
       if (
@@ -1141,7 +1135,6 @@ router.post(
         password
       } = req.body;
 
-
       email =
         String(email || "")
           .trim()
@@ -1161,7 +1154,6 @@ router.post(
       password =
         String(password || "");
 
-
       /* ---------------------------------------------
          VALIDATION
       --------------------------------------------- */
@@ -1174,7 +1166,6 @@ router.post(
         });
       }
 
-
       if (!email && !mobile) {
         return res.status(400).json({
           success: false,
@@ -1182,7 +1173,6 @@ router.post(
             "Email or mobile number is required"
         });
       }
-
 
       if (email && mobile) {
         return res.status(400).json({
@@ -1192,12 +1182,9 @@ router.post(
         });
       }
 
-
       if (mobile) {
 
-        if (
-          !isValidMobile(mobile)
-        ) {
+        if (!isValidMobile(mobile)) {
           return res.status(400).json({
             success: false,
             message:
@@ -1206,13 +1193,11 @@ router.post(
         }
       }
 
-
       /* ---------------------------------------------
          FIND USER
       --------------------------------------------- */
 
       let userResult;
-
 
       if (mobile) {
 
@@ -1245,13 +1230,10 @@ router.post(
           );
       }
 
-
       const user =
         userResult.rows[0];
 
-
       if (!user) {
-
         return res.status(401).json({
           success: false,
           message:
@@ -1259,22 +1241,17 @@ router.post(
         });
       }
 
-
       /* ---------------------------------------------
          EMAIL VERIFICATION
       --------------------------------------------- */
 
-      if (
-        user.email_verified !== true
-      ) {
-
+      if (user.email_verified !== true) {
         return res.status(403).json({
           success: false,
           message:
             "Please verify your email before logging in."
         });
       }
-
 
       /* ---------------------------------------------
          PASSWORD
@@ -1286,9 +1263,7 @@ router.post(
           user.password_hash
         );
 
-
       if (!passwordMatch) {
-
         return res.status(401).json({
           success: false,
           message:
@@ -1296,60 +1271,47 @@ router.post(
         });
       }
 
-
       /* ---------------------------------------------
-         CREATE LOGIN OTP
+         DIRECT LOGIN
+         NO LOGIN EMAIL OTP
       --------------------------------------------- */
 
-      const challengeToken =
-        createChallengeToken(
-          user.id,
-          user.email,
-          "login"
+      const token =
+        jwt.sign(
+          {
+            userId: user.id,
+            username: user.username,
+            role: user.role
+          },
+          JWT_SECRET,
+          {
+            expiresIn: "7d"
+          }
         );
-
-
-      try {
-
-        /*
-          2FA / OTP is still sent
-          to the user's registered email.
-        */
-
-        await sendOtp(
-          user.id,
-          user.email,
-          "login"
-        );
-
-      } catch (emailError) {
-
-        console.error(
-          "LOGIN OTP EMAIL ERROR:",
-          emailError
-        );
-
-
-        return res.status(503).json({
-          success: false,
-          message:
-            "Unable to send login verification code. Please try again."
-        });
-      }
-
-
-      /* ---------------------------------------------
-         OTP REQUIRED
-      --------------------------------------------- */
 
       return res.json({
         success: true,
         message:
-          "Verification code sent to your email.",
-        requiresTwoFactor: true,
-        challengeToken
+          "Login successful",
+        token,
+        user: {
+          id: user.id,
+          username: user.username,
+          email: user.email,
+          country_code:
+            user.country_code || null,
+          mobile:
+            user.mobile || null,
+          role: user.role,
+          referral_code:
+            user.referral_code,
+          kyc_status:
+            user.kyc_status,
+          email_verified: 1,
+          created_at:
+            user.created_at
+        }
       });
-
 
     } catch (error) {
 
@@ -1357,7 +1319,6 @@ router.post(
         "LOGIN ERROR:",
         error
       );
-
 
       return res.status(500).json({
         success: false,
@@ -2073,6 +2034,7 @@ router.get(
     }
   }
 );
+
 
 
 

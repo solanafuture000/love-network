@@ -4,9 +4,9 @@ import Auth from "./components/Auth";
 import "./styles/global.css";
 
 function App() {
-  const [token, setToken] = useState(() => {
-    return localStorage.getItem("love_token");
-  });
+  const [token, setToken] = useState(() =>
+    localStorage.getItem("love_token")
+  );
 
   useEffect(() => {
     const handleAuthChange = () => {

@@ -1,4 +1,3 @@
-
 const API_BASE_URL = "https://love-network.onrender.com/api";
 
 async function request(endpoint, options = {}) {
@@ -221,6 +220,22 @@ export const api = {
 
 
   // --------------------------------------------------
+  // MIGRATION
+  // --------------------------------------------------
+
+  getMigrationStatus() {
+    return request("/migration/status");
+  },
+
+  migrateMiningBalance(destinationAddress, amount) {
+    return request("/migration", {
+      method: "POST",
+      body: JSON.stringify({ destinationAddress, amount })
+    });
+  },
+
+
+  // --------------------------------------------------
   // WALLET
   // --------------------------------------------------
 
@@ -244,6 +259,22 @@ export const api = {
         walletName
       })
     });
+  },
+
+  // Unlock an existing LOVE wallet with its private key
+  unlockWallet(walletId, privateKey) {
+    return request("/wallet/unlock", {
+      method: "POST",
+      body: JSON.stringify({
+        walletId,
+        privateKey
+      })
+    });
+  },
+
+  // Load transactions for one specific LOVE wallet
+  getWalletTransactions(walletId) {
+    return request(`/wallet/${walletId}/transactions`);
   },
 
 

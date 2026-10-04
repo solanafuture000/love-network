@@ -2,7 +2,7 @@ import React, { useEffect, useState } from "react";
 import PhoneInput, { getCountryCallingCode } from "react-phone-number-input";
 import "react-phone-number-input/style.css";
 
-const API_URL = "https://love-network.onrender.com";
+const API_URL = "http://localhost:5000";
 
 export default function Auth() {
   const [mode, setMode] = useState("login");
@@ -13,6 +13,7 @@ export default function Auth() {
   const [mobile, setMobile] = useState("");
   const [mobileCountry, setMobileCountry] = useState("PK");
   const [password, setPassword] = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
   const [referralCode, setReferralCode] = useState("");
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
@@ -138,14 +139,6 @@ export default function Auth() {
 
     if (!response.ok) {
       throw new Error(data.message || "Login failed");
-    }
-
-    if (data.requiresTwoFactor) {
-      setChallengeToken(data.challengeToken);
-      setTwoFactorStep(true);
-      setOtp("");
-      setMessage("OTP sent to your registered email.");
-      return;
     }
 
     if (data.token) {
@@ -482,6 +475,21 @@ export default function Auth() {
         if (!mobile) {
           throw new Error(
             "Please select your country and enter your mobile number."
+          );
+        }
+
+        const strongPassword =
+          /^(?=.*[A-Z])(?=.*[a-z])(?=.*\d)(?=.*[^A-Za-z0-9]).{8,}$/;
+
+        if (!strongPassword.test(password)) {
+          throw new Error(
+            "Password must be at least 8 characters and include uppercase, lowercase, number and special character."
+          );
+        }
+
+        if (password !== confirmPassword) {
+          throw new Error(
+            "Passwords do not match."
           );
         }
 
@@ -1746,7 +1754,8 @@ export default function Auth() {
 
                 <div
                   style={{
-                    marginBottom: "10px",
+                    marginBottom:
+                      mode === "register" ? "10px" : "17px",
                   }}
                 >
                   <label style={labelStyle}>
@@ -1773,7 +1782,9 @@ export default function Auth() {
                       }
                       placeholder="Enter your password"
                       required
-                      minLength={6}
+                      minLength={
+                        mode === "register" ? 8 : 1
+                      }
                       autoComplete={
                         mode === "login"
                           ? "current-password"
@@ -1814,8 +1825,184 @@ export default function Auth() {
                         : "Show"}
                     </button>
                   </div>
+
+                  {mode === "register" &&
+                    password.length > 0 && (
+                      <div
+                        style={{
+                          marginTop: "9px",
+                          padding: "10px 12px",
+                          borderRadius: "10px",
+                          background:
+                            "rgba(15, 23, 42, 0.55)",
+                          border:
+                            "1px solid rgba(148, 163, 184, 0.12)",
+                        }}
+                      >
+                        <div
+                          style={{
+                            display: "flex",
+                            alignItems: "center",
+                            justifyContent:
+                              "space-between",
+                            marginBottom: "7px",
+                          }}
+                        >
+                          <span
+                            style={{
+                              color: "#94a3b8",
+                              fontSize: "11px",
+                              fontWeight: "600",
+                            }}
+                          >
+                            Password strength
+                          </span>
+
+                          <span
+                            style={{
+                              color:
+                                password.length >= 8 &&
+                                /[A-Z]/.test(password) &&
+                                /[a-z]/.test(password) &&
+                                /\d/.test(password) &&
+                                /[^A-Za-z0-9]/.test(
+                                  password
+                                )
+                                  ? "#22c55e"
+                                  : password.length >= 8
+                                  ? "#f59e0b"
+                                  : "#ef4444",
+                              fontSize: "11px",
+                              fontWeight: "700",
+                            }}
+                          >
+                            {password.length >= 8 &&
+                            /[A-Z]/.test(password) &&
+                            /[a-z]/.test(password) &&
+                            /\d/.test(password) &&
+                            /[^A-Za-z0-9]/.test(
+                              password
+                            )
+                              ? "Strong"
+                              : password.length >= 8 &&
+                                [
+                                  /[A-Z]/.test(
+                                    password
+                                  ),
+                                  /[a-z]/.test(
+                                    password
+                                  ),
+                                  /\d/.test(password),
+                                  /[^A-Za-z0-9]/.test(
+                                    password
+                                  ),
+                                ].filter(Boolean).length >=
+                                  3
+                              ? "Medium"
+                              : "Weak"}
+                          </span>
+                        </div>
+
+                        <div
+                          style={{
+                            display: "grid",
+                            gridTemplateColumns:
+                              "repeat(2, minmax(0, 1fr))",
+                            gap: "5px 10px",
+                          }}
+                        >
+                          {[
+                            [
+                              password.length >= 8,
+                              "8+ characters",
+                            ],
+                            [
+                              /[A-Z]/.test(password),
+                              "Uppercase letter",
+                            ],
+                            [
+                              /[a-z]/.test(password),
+                              "Lowercase letter",
+                            ],
+                            [
+                              /\d/.test(password),
+                              "Number",
+                            ],
+                            [
+                              /[^A-Za-z0-9]/.test(
+                                password
+                              ),
+                              "Special character",
+                            ],
+                          ].map(([valid, text]) => (
+                            <div
+                              key={text}
+                              style={{
+                                display: "flex",
+                                alignItems: "center",
+                                gap: "5px",
+                                color: valid
+                                  ? "#22c55e"
+                                  : "#64748b",
+                                fontSize: "10px",
+                              }}
+                            >
+                              <span>
+                                {valid ? "?" : "?"}
+                              </span>
+                              <span>{text}</span>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
                 </div>
 
+                {mode === "register" && (
+                  <div
+                    style={{
+                      marginBottom: "17px",
+                    }}
+                  >
+                    <label style={labelStyle}>
+                      Confirm Password
+                    </label>
+
+                    <input
+                      className="love-auth-input"
+                      type="password"
+                      value={confirmPassword}
+                      onChange={(e) =>
+                        setConfirmPassword(
+                          e.target.value
+                        )
+                      }
+                      placeholder="Confirm your password"
+                      required
+                      minLength={8}
+                      autoComplete="new-password"
+                      style={inputStyle}
+                    />
+
+                    {confirmPassword.length > 0 && (
+                      <div
+                        style={{
+                          marginTop: "6px",
+                          fontSize: "10px",
+                          color:
+                            password === confirmPassword
+                              ? "#22c55e"
+                              : "#ef4444",
+                          fontWeight: "600",
+                        }}
+                      >
+                        {password === confirmPassword
+                          ? "? Passwords match"
+                          : "? Passwords do not match"}
+                      </div>
+                    )}
+                  </div>
+                )}
                 {mode === "login" && (
                   <div
                     style={{
@@ -2016,6 +2203,18 @@ export default function Auth() {
     </>
   );
 }
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 

@@ -290,7 +290,7 @@ router.post("/create", authenticateToken, async (req, res) => {
 
 /*
 |--------------------------------------------------------------------------
-| LOVE → LOVE TRANSFER
+| LOVE â†’ LOVE TRANSFER
 |--------------------------------------------------------------------------
 | Direct wallet-to-wallet transfer.
 |
@@ -313,6 +313,14 @@ router.post("/transfer", authenticateToken, async (req, res) => {
         : "";
 
     const amount = Number(req.body.amount);
+    const walletId = Number(req.body.walletId);
+
+    if (!Number.isInteger(walletId) || walletId <= 0) {
+      return res.status(400).json({
+        success: false,
+        message: "Valid sender wallet is required."
+      });
+    }
 
     if (!receiverAddress) {
       return res.status(400).json({
@@ -352,7 +360,7 @@ router.post("/transfer", authenticateToken, async (req, res) => {
 
       /*
       |--------------------------------------------------------------------------
-      | Find sender default wallet
+      | Find current unlocked sender wallet
       |--------------------------------------------------------------------------
       */
       const senderResult = await client.query(
@@ -364,11 +372,11 @@ router.post("/transfer", authenticateToken, async (req, res) => {
           public_address,
           balance
         FROM user_wallets
-        WHERE user_id = $1
-          AND is_default = TRUE
+        WHERE id = $1
+          AND user_id = $2
         LIMIT 1
         `,
-        [senderUserId]
+        [walletId, senderUserId]
       );
 
       const senderWallet = senderResult.rows[0];
@@ -378,7 +386,7 @@ router.post("/transfer", authenticateToken, async (req, res) => {
 
         return res.status(404).json({
           success: false,
-          message: "Sender default wallet not found."
+          message: "Sender wallet not found."
         });
       }
 

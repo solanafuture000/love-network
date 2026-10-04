@@ -5,6 +5,7 @@ import BalanceCard from "../components/BalanceCard";
 import StatsCard from "../components/StatsCard";
 import ReferralCard from "../components/ReferralCard";
 import KycCard from "../components/KycCard";
+import MigrationCard from "../components/MigrationCard";
 import QuickActions from "../components/QuickActions";
 import WalletCard from "../components/WalletCard";
 import ProfileCard from "../components/ProfileCard";
@@ -18,6 +19,8 @@ import { api } from "../services/api";
 export default function Dashboard() {
   const [isMining, setIsMining] = useState(false);
   const [balance, setBalance] = useState(0);
+  const [pendingBalance, setPendingBalance] = useState(0);
+  const [migrationBalance, setMigrationBalance] = useState(0);
   const [todayEarned, setTodayEarned] = useState(0);
   const [weekEarned, setWeekEarned] = useState(0);
   const [monthEarned, setMonthEarned] = useState(0);
@@ -33,6 +36,14 @@ export default function Dashboard() {
       if (data.user?.walletBalance !== undefined) {
         setBalance(Number(data.user.walletBalance));
       }
+
+      setPendingBalance(
+        Number(data.user?.pendingBalance || 0)
+      );
+
+      setMigrationBalance(
+        Number(data.user?.migrationBalance || 0)
+      );
 
       setIsMining(Boolean(data.user?.miningActive));
 
@@ -156,6 +167,8 @@ export default function Dashboard() {
         <BalanceCard
           isMining={isMining}
           balance={balance}
+          pendingBalance={pendingBalance}
+          migrationBalance={migrationBalance}
         />
 
         <div id="mining">
@@ -169,22 +182,23 @@ export default function Dashboard() {
           todayEarned={todayEarned}
           weekEarned={weekEarned}
           monthEarned={monthEarned}
-        />
-
-        <div id="wallet">
-          <WalletCard
-            balance={balance}
-            setBalance={handleWalletBalance}
-          />
+        />        <div id="wallet" className="coming-soon-card">
+          <div className="coming-soon-icon">L</div>
+          <div>
+            <span>Wallet</span>
+            <h3>Coming Soon</h3>
+            <p>LOVE Wallet features are coming soon.</p>
+          </div>
         </div>
-
-        <div id="referral">
+<div id="referral">
           <ReferralCard />
         </div>
 
         <div id="kyc">
           <KycCard />
         </div>
+
+        <MigrationCard />
 
         <ProfileCard />
 
@@ -203,15 +217,4 @@ export default function Dashboard() {
     </div>
   );
 }
-
-
-
-
-
-
-
-
-
-
-
 

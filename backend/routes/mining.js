@@ -239,10 +239,30 @@ async function settleMiningSession(session, userId) {
 
     const completedSession = sessionUpdate.rows[0];
 
+    const kycBalanceResult = await client.query(
+      `
+      SELECT status
+      FROM user_kyc
+      WHERE user_id = $1
+      LIMIT 1
+      `,
+      [userId]
+    );
+
+    const kycBalanceApproved =
+      String(kycBalanceResult.rows[0]?.status || "").toUpperCase() === "APPROVED";
+
     const newBalance = Number(
       (
-        Number(wallet.balance) +
+        Number(wallet.balance || 0) +
         reward
+      ).toFixed(8)
+    );
+
+    const newMigrationBalance = Number(
+      (
+        Number(wallet.migration_balance || 0) +
+        (kycBalanceApproved ? reward : 0)
       ).toFixed(8)
     );
 
@@ -266,12 +286,14 @@ async function settleMiningSession(session, userId) {
       SET
         balance = $1,
         total_mined = $2,
+        migration_balance = $3,
         updated_at = CURRENT_TIMESTAMP
-      WHERE user_id = $3
+      WHERE user_id = $4
       `,
       [
         newBalance,
         newWalletTotalMined,
+        newMigrationBalance,
         userId
       ]
     );
@@ -396,46 +418,67 @@ async function settleMiningSession(session, userId) {
               ]
             );
 
+            const referrerWalletResult =
+              await client.query(
+                `
+                SELECT
+                  balance,
+                  pending_balance,
+                  migration_balance
+                FROM wallets
+                WHERE user_id = $1
+                FOR UPDATE
+                `,
+                [referral.referrer_user_id]
+              );
+
+            const referrerWallet =
+              referrerWalletResult.rows[0] || null;
+
+            if (!referrerWallet) {
+              throw new Error("Referrer wallet not found");
+            }
+
+            const referrerKycResult = await client.query(
+              `
+              SELECT status
+              FROM user_kyc
+              WHERE user_id = $1
+              LIMIT 1
+              `,
+              [referral.referrer_user_id]
+            );
+
+            const referrerKycApproved =
+              String(referrerKycResult.rows[0]?.status || "").toUpperCase() === "APPROVED";
+
+            const referrerNewBalance = Number(
+              (
+                Number(referrerWallet.balance || 0) +
+                referralReward
+              ).toFixed(8)
+            );
+
             if (kycApproved) {
-              const referrerWalletResult =
-                await client.query(
-                  `
-                  SELECT
-                    balance
-                  FROM wallets
-                  WHERE user_id = $1
-                  FOR UPDATE
-                  `,
-                  [referral.referrer_user_id]
-                );
-
-              const referrerWallet =
-                referrerWalletResult.rows[0] || null;
-
-              if (!referrerWallet) {
-                throw new Error(
-                  "Referrer wallet not found"
-                );
-              }
-
-              const referrerNewBalance =
-                Number(
-                  (
-                    Number(referrerWallet.balance) +
-                    referralReward
-                  ).toFixed(8)
-                );
+              const referrerNewMigrationBalance = Number(
+                (
+                  Number(referrerWallet.migration_balance || 0) +
+                  (referrerKycApproved ? referralReward : 0)
+                ).toFixed(8)
+              );
 
               await client.query(
                 `
                 UPDATE wallets
                 SET
                   balance = $1,
+                  migration_balance = $2,
                   updated_at = CURRENT_TIMESTAMP
-                WHERE user_id = $2
+                WHERE user_id = $3
                 `,
                 [
                   referrerNewBalance,
+                  referrerNewMigrationBalance,
                   referral.referrer_user_id
                 ]
               );
@@ -476,6 +519,29 @@ async function settleMiningSession(session, userId) {
                 [
                   referralReward,
                   referral.id
+                ]
+              );
+            } else {
+              const referrerNewPendingBalance = Number(
+                (
+                  Number(referrerWallet.pending_balance || 0) +
+                  referralReward
+                ).toFixed(8)
+              );
+
+              await client.query(
+                `
+                UPDATE wallets
+                SET
+                  balance = $1,
+                  pending_balance = $2,
+                  updated_at = CURRENT_TIMESTAMP
+                WHERE user_id = $3
+                `,
+                [
+                  referrerNewBalance,
+                  referrerNewPendingBalance,
+                  referral.referrer_user_id
                 ]
               );
             }
@@ -1280,6 +1346,18 @@ router.get(
             Number(
               Number(
                 wallet.total_mined
+              ).toFixed(8)
+            ),
+          pendingBalance:
+            Number(
+              Number(
+                wallet.pending_balance || 0
+              ).toFixed(8)
+            ),
+          migrationBalance:
+            Number(
+              Number(
+                wallet.migration_balance || 0
               ).toFixed(8)
             ),
           miningActive:

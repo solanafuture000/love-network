@@ -1,7 +1,9 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { api } from "../services/api";
+import { addLoveNotification } from "../services/notifications";
 
 const MINING_DURATION = 12 * 60 * 60 * 1000;
+const MINING_STATUS_KEY = "love_previous_mining_status";
 
 function MiningCard({ isMining, setIsMining }) {
   const [timeLeft, setTimeLeft] = useState(0);
@@ -9,11 +11,53 @@ function MiningCard({ isMining, setIsMining }) {
   const [rate, setRate] = useState(0.25);
   const [loading, setLoading] = useState(false);
 
+  const previousMiningState = useRef(null);
+
   const loadMiningStatus = async () => {
     try {
       const data = await api.getMiningDashboard();
 
       const active = Boolean(data.user?.miningActive);
+
+      const previousStoredState =
+        localStorage.getItem(MINING_STATUS_KEY) === "true";
+
+      if (previousMiningState.current === null) {
+        previousMiningState.current = previousStoredState;
+      }
+
+      /*
+       * Mining completed:
+       * Previous state was active, backend now reports inactive.
+       */
+      if (previousMiningState.current === true && !active) {
+        const completedReward =
+          data.session?.reward !== undefined &&
+          data.session?.reward !== null
+            ? Number(data.session.reward || 0)
+            : 0;
+
+        addLoveNotification({
+          type: "mining",
+          title: "Mining Completed",
+          message:
+            completedReward > 0
+              ? `Your mining session completed. You earned ${completedReward.toFixed(
+                  2
+                )} LOVE.`
+              : "Your 12-hour mining session has completed.",
+          icon: "mining",
+        });
+      }
+
+      /*
+       * Keep the latest mining state locally.
+       */
+      previousMiningState.current = active;
+      localStorage.setItem(
+        MINING_STATUS_KEY,
+        String(active)
+      );
 
       setIsMining(active);
 
@@ -87,6 +131,21 @@ function MiningCard({ isMining, setIsMining }) {
 
       setIsMining(true);
 
+      previousMiningState.current = true;
+
+      localStorage.setItem(
+        MINING_STATUS_KEY,
+        "true"
+      );
+
+      addLoveNotification({
+        type: "mining",
+        title: "Mining Started",
+        message:
+          "Your 12-hour LOVE mining session has started successfully.",
+        icon: "mining",
+      });
+
       if (data.rewardPerHour !== undefined) {
         setRate(Number(data.rewardPerHour));
       }
@@ -101,7 +160,9 @@ function MiningCard({ isMining, setIsMining }) {
       setEarned(0);
     } catch (error) {
       console.error("Start mining error:", error);
+
       alert(error.message || "Unable to start mining");
+
       await loadMiningStatus();
     } finally {
       setLoading(false);
@@ -111,7 +172,9 @@ function MiningCard({ isMining, setIsMining }) {
   const totalSeconds = Math.floor(timeLeft / 1000);
 
   const hours = Math.floor(totalSeconds / 3600);
-  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const minutes = Math.floor(
+    (totalSeconds % 3600) / 60
+  );
   const seconds = totalSeconds % 60;
 
   const formattedTime =
@@ -122,7 +185,9 @@ function MiningCard({ isMining, setIsMining }) {
     String(seconds).padStart(2, "0");
 
   const progress = isMining
-    ? ((MINING_DURATION - timeLeft) / MINING_DURATION) * 100
+    ? ((MINING_DURATION - timeLeft) /
+        MINING_DURATION) *
+      100
     : 0;
 
   return (
@@ -130,7 +195,11 @@ function MiningCard({ isMining, setIsMining }) {
       <div className="mining-card-header">
         <div>
           <span>Mining Status</span>
-          <h3>{isMining ? "Mining Active" : "Ready to Mine"}</h3>
+          <h3>
+            {isMining
+              ? "Mining Active"
+              : "Ready to Mine"}
+          </h3>
         </div>
 
         <div
@@ -144,7 +213,9 @@ function MiningCard({ isMining, setIsMining }) {
 
       <div className="mining-rate">
         <span>Current Mining Rate</span>
-        <strong>{rate.toFixed(2)} LOVE / hour</strong>
+        <strong>
+          {rate.toFixed(2)} LOVE / hour
+        </strong>
       </div>
 
       {isMining && (
@@ -158,7 +229,10 @@ function MiningCard({ isMining, setIsMining }) {
         <div
           className="mining-progress-bar"
           style={{
-            width: `${Math.min(100, Math.max(0, progress))}%`,
+            width: `${Math.min(
+              100,
+              Math.max(0, progress)
+            )}%`,
           }}
         />
       </div>
@@ -166,12 +240,16 @@ function MiningCard({ isMining, setIsMining }) {
       <div className="mining-info">
         <div>
           <small>Session</small>
-          <strong>{isMining ? "12 Hours" : "Ready"}</strong>
+          <strong>
+            {isMining ? "12 Hours" : "Ready"}
+          </strong>
         </div>
 
         <div>
           <small>Session Earned</small>
-          <strong>{earned.toFixed(2)} LOVE</strong>
+          <strong>
+            {earned.toFixed(2)} LOVE
+          </strong>
         </div>
       </div>
 

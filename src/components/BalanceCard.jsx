@@ -1,16 +1,27 @@
+function BalanceCard({
+  isMining,
+  balance = 0,
+  pendingBalance = 0,
+  migrationBalance = 0
+}) {
+  const total = Number(balance || 0);
+  const pending = Number(pendingBalance || 0);
+  const migration = Number(migrationBalance || 0);
 
-function BalanceCard({ isMining, balance = 1250 }) {
-  const totalBalance = Number(balance).toFixed(2);
+  const totalBalance = total.toFixed(2);
+  const availableBalance = Math.max(
+    0,
+    total - pending
+  ).toFixed(2);
 
-  const availableBalance = Number(balance).toFixed(2);
-
-  const pendingBalance = isMining ? "0.00" : "0.00";
+  const pendingDisplay = pending.toFixed(2);
+  const migrationDisplay = migration.toFixed(2);
 
   return (
     <section className="balance-card">
       <div className="balance-top">
         <div>
-          <span>Total Balance</span>
+          <span>Main Balance</span>
           <h2>{totalBalance} LOVE</h2>
         </div>
 
@@ -27,7 +38,12 @@ function BalanceCard({ isMining, balance = 1250 }) {
 
         <div>
           <small>Pending</small>
-          <strong>{pendingBalance} LOVE</strong>
+          <strong>{pendingDisplay} LOVE</strong>
+        </div>
+
+        <div>
+          <small>Migration</small>
+          <strong>{migrationDisplay} LOVE</strong>
         </div>
       </div>
 
@@ -39,9 +55,9 @@ function BalanceCard({ isMining, balance = 1250 }) {
         </span>
 
         <span>
-          {isMining
-            ? "Earning LOVE"
-            : "Start mining"}
+          {migration > 0
+            ? `${migrationDisplay} LOVE ready for migration`
+            : "KYC approval required for migration"}
         </span>
       </div>
     </section>
@@ -49,4 +65,3 @@ function BalanceCard({ isMining, balance = 1250 }) {
 }
 
 export default BalanceCard;
-
